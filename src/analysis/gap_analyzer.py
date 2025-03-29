@@ -10,6 +10,7 @@ from typing import Dict, List, Any
 from dataclasses import dataclass
 from ..utils.llm_logger import LLMLogger
 from .codebase_analyzer import CodebaseAnalyzer
+import os
 
 
 @dataclass
@@ -22,6 +23,7 @@ class Gap:
     priority: int
     implementation_details: Dict[str, Any]
     suggested_fixes: List[str]  # Suggested fixes
+    type: str = "general"  # More generic default type
 
 
 class GapAnalyzer:
@@ -34,6 +36,7 @@ class GapAnalyzer:
         self.codebase_index: Dict[str, Any] = {}
         self.codebase_analyzer = CodebaseAnalyzer()
         self.llm_logger = LLMLogger()
+        self.file_contents = {}
         
     def analyze_codebase(self, root_dir: str) -> None:
         """
@@ -43,8 +46,20 @@ class GapAnalyzer:
             root_dir: Root directory of the codebase
         """
         try:
-            # Use CodebaseAnalyzer to analyze implemented features
+            # First get the CodebaseAnalyzer results
             self.codebase_index = self.codebase_analyzer.analyze_codebase(root_dir)
+            
+            # Now also read the actual file contents
+            self.file_contents = {}
+            for file_path in self.codebase_index.keys():
+                full_path = os.path.join(root_dir, file_path)
+                try:
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        self.file_contents[file_path] = f.read()
+                    self.logger.info(f"Successfully read contents of {file_path}")
+                except Exception as e:
+                    self.logger.error(f"Failed to read {file_path}: {str(e)}")
+                
             self.logger.info("Codebase analysis completed")
         except Exception as e:
             self.logger.error(f"Failed to analyze codebase: {str(e)}")
@@ -52,17 +67,20 @@ class GapAnalyzer:
 
     def identify_gaps(self, whitepaper: Dict[str, Any], current_state: Dict[str, Any]) -> List[Gap]:
         """
-        Identify gaps between current state and whitepaper requirements.
+        Compare whitepaper requirements against current codebase implementation.
         
         Args:
-            whitepaper: Dictionary containing whitepaper analysis
+            whitepaper: Dictionary containing whitepaper analysis results
             current_state: Dictionary containing current codebase state
             
         Returns:
-            List of identified gaps
+            List of Gap objects representing identified gaps
         """
         try:
             self.gaps = []
+            
+            # Start a new LLM logging session for gap analysis
+            self.llm_logger.start_session("gap_analysis")
             
             # Get features from whitepaper
             features = whitepaper.get("features", [])
@@ -72,33 +90,42 @@ class GapAnalyzer:
             
             self.logger.info(f"Total features to analyze: {len(features)}")
             
-            # Get implemented features from codebase analysis
-            implemented_features = self._get_implemented_features()
+            # Get actual files and their contents from current_state
+            actual_files = list(current_state.keys())
+            self.logger.info(f"Found {len(actual_files)} files in codebase")
             
             # Analyze each feature from whitepaper
             for feature in features:
                 feature_name = feature["name"]
                 feature_desc = feature["description"]
-                feature_section = feature["section"]
+                feature_section = feature.get("section", "general")
+                
+                self.logger.info(f"Analyzing feature: {feature_name}")
                 
                 # Check if feature is implemented
                 status, reason, files, details, suggestions = self._analyze_feature(
                     feature_name,
                     feature_desc,
-                    implemented_features
+                    current_state,
+                    actual_files
                 )
+                
+                self.logger.info(f"Analysis result for {feature_name}: {status}")
                 
                 # Create gap if feature is not fully implemented
                 if status.lower() not in ["complete", "completed", "implemented", "done", "finished", "ready"]:
-                    self.gaps.append(Gap(
+                    gap = Gap(
                         section=feature_section,
                         status=status.lower(),
                         reason=reason,
                         affected_files=files,
                         priority=self._determine_priority(status.lower(), feature_section),
                         implementation_details=details,
-                        suggested_fixes=suggestions
-                    ))
+                        suggested_fixes=suggestions,
+                        type=feature_section.split(" - ")[0].lower()
+                    )
+                    self.gaps.append(gap)
+                    self.logger.info(f"Gap identified for {feature_name}: {reason}")
             
             self.logger.info(f"Total gaps identified: {len(self.gaps)}")
             return self.gaps
@@ -107,21 +134,19 @@ class GapAnalyzer:
             self.logger.error(f"Failed to identify gaps: {str(e)}")
             raise
             
-    def _get_implemented_features(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Get all implemented features from codebase analysis."""
-        return self.codebase_index
-        
     def _analyze_feature(self, 
                         feature_name: str,
                         feature_desc: str,
-                        implemented_features: Dict[str, List[Dict[str, Any]]]) -> tuple[str, str, List[str], Dict[str, Any], List[str]]:
+                        current_state: Dict[str, Any],
+                        actual_files: List[str]) -> tuple[str, str, List[str], Dict[str, Any], List[str]]:
         """
         Analyze a feature to determine its implementation status.
         
         Args:
             feature_name: Name of the feature to analyze
             feature_desc: Description of the feature
-            implemented_features: Dictionary of implemented features
+            current_state: Dictionary containing current codebase state
+            actual_files: List of existing files in the codebase
             
         Returns:
             Tuple of (status, reason, affected_files, details, suggestions)
@@ -134,23 +159,36 @@ Feature to analyze:
 Name: {feature_name}
 Description: {feature_desc}
 
-Implemented features:
+Current codebase structure:
+Files that exist: {', '.join(actual_files)}
+
+Actual code from relevant files:
 """
-            for file_path, features in implemented_features.items():
-                prompt += f"\nFile: {file_path}\n"
-                for feature in features:
-                    prompt += f"- {feature['type']}: {feature['description']}\n"
-            
+            # Add the actual file contents
+            for file_path in actual_files:
+                prompt += f"\n=== {file_path} ===\n"
+                if file_path in self.file_contents:
+                    prompt += f"```python\n{self.file_contents[file_path]}\n```\n"
+                else:
+                    prompt += "(File not accessible)\n"
+
             prompt += """
+IMPORTANT: 
+1. Analyze the actual code shown above.
+2. Be specific about what exists and what's missing.
+3. Reference specific parts of the code in your analysis.
+4. If suggesting changes, consider the existing code structure.
+
 Provide your analysis in this format:
 STATUS: <complete/partial/missing/planned>
-REASON: <explanation>
-FILES: <affected files, one per line>
-CURRENT_STATE: <current implementation analysis>
+REASON: <explanation with specific references to the code>
+FILES: <affected files>
+CURRENT_STATE: <detailed analysis of current implementation>
 MISSING_COMPONENTS:
 - <component 1>
 - <component 2>
-SUGGESTED_APPROACH: <implementation approach>
+IMPLEMENTATION_STRATEGY: <explain whether to modify existing files or create new ones, and why>
+SUGGESTED_APPROACH: <detailed implementation approach>
 SUGGESTIONS:
 - <suggestion 1>
 - <suggestion 2>
@@ -158,7 +196,7 @@ SUGGESTIONS:
             
             # Get response from LLM
             response = self._get_llm_response(
-                "You are a code analysis expert. Analyze if the feature is implemented and provide detailed feedback.",
+                "You are a code analysis expert. Analyze if the feature is implemented and provide detailed feedback. Focus on the actual codebase structure and suggest improvements within existing files.",
                 prompt
             )
             
@@ -171,13 +209,18 @@ SUGGESTIONS:
             suggested_approach = self._extract_section(response, "SUGGESTED_APPROACH:")
             suggestions = [s.strip()[2:] for s in self._extract_section(response, "SUGGESTIONS:").split('\n') if s.strip().startswith('- ')]
             
+            # Validate files mentioned in response
+            valid_files = [f for f in files if f in actual_files]
+            if len(valid_files) != len(files):
+                self.logger.warning(f"Some files mentioned in analysis do not exist: {set(files) - set(valid_files)}")
+            
             details = {
                 "current_state": current_state,
                 "missing_components": missing_components,
                 "suggested_approach": suggested_approach
             }
             
-            return status, reason, files, details, suggestions
+            return status, reason, valid_files, details, suggestions
             
         except Exception as e:
             self.logger.error(f"Failed to analyze feature: {str(e)}")
@@ -218,7 +261,6 @@ SUGGESTIONS:
     def _get_llm_response(self, system_prompt: str, user_prompt: str) -> str:
         """Get response from OpenAI's GPT-4 model."""
         try:
-            import os
             from openai import OpenAI
             from dotenv import load_dotenv
             import httpx
@@ -279,4 +321,101 @@ SUGGESTIONS:
             
         except Exception as e:
             self.logger.error(f"Failed to get LLM response: {str(e)}")
+            raise 
+
+    def implement_gap(self, gap: Gap, current_state: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Generate implementation code for a given gap.
+        
+        Args:
+            gap: Gap object containing analysis details
+            current_state: Current state of the codebase
+            
+        Returns:
+            Dict mapping file paths to their updated content
+        """
+        try:
+            # Start implementation session
+            self.llm_logger.start_session("gap_implementation")
+            
+            # Create implementation prompt
+            prompt = f"""Generate the implementation code for the following gap:
+
+FEATURE GAP:
+Name: {gap.section}
+Status: {gap.status}
+Reason: {gap.reason}
+
+CURRENT STATE:
+{gap.implementation_details['current_state']}
+
+MISSING COMPONENTS:
+{chr(10).join(f"- {component}" for component in gap.implementation_details['missing_components'])}
+
+IMPLEMENTATION APPROACH:
+{gap.implementation_details['suggested_approach']}
+
+FILES TO MODIFY:
+{chr(10).join(gap.affected_files)}
+
+Current code in affected files:
+"""
+            # Add current file contents
+            for file_path in gap.affected_files:
+                if file_path in current_state:
+                    prompt += f"\n--- {file_path} ---\n"
+                    if isinstance(current_state[file_path], dict):
+                        # Handle structured content
+                        prompt += str(current_state[file_path])
+                    else:
+                        # Handle raw file content
+                        prompt += str(current_state[file_path])
+
+            prompt += """
+IMPORTANT:
+1. Provide complete, implementation-ready code for each file that needs to be modified
+2. Maintain the existing code style and structure
+3. Include clear comments explaining the changes
+4. Only modify the specified files
+5. Ensure the implementation addresses all missing components
+
+Format your response as follows for each file:
+
+---FILE: <filename>---
+```python
+<complete file content with your changes>
+```
+CHANGES EXPLAINED:
+- <explanation of major changes>
+- <explanation of how this addresses the gap>
+"""
+
+            # Get implementation from LLM
+            response = self._get_llm_response(
+                "You are an expert code implementer. Generate complete, working code that implements the missing functionality while maintaining the existing codebase structure and style.",
+                prompt
+            )
+
+            # Parse the response into a map of file changes
+            file_changes = {}
+            current_file = None
+            current_content = []
+            
+            for line in response.split('\n'):
+                if line.startswith('---FILE:'):
+                    if current_file and current_content:
+                        file_changes[current_file] = '\n'.join(current_content)
+                        current_content = []
+                    current_file = line.replace('---FILE:', '').strip()
+                elif line.startswith('CHANGES EXPLAINED:'):
+                    if current_file and current_content:
+                        file_changes[current_file] = '\n'.join(current_content)
+                    break
+                elif current_file:
+                    current_content.append(line)
+
+            return file_changes
+
+        except Exception as e:
+            self.logger.error(f"Failed to implement gap: {str(e)}")
             raise 
