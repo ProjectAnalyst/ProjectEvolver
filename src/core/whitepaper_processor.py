@@ -12,6 +12,8 @@ import re
 import uuid
 from dataclasses import dataclass
 import ast
+import json
+from ..utils.llm_logger import LLMLogger
 
 
 @dataclass
@@ -26,6 +28,14 @@ class Section:
     file_paths: List[str]  # File paths mentioned in the section
 
 
+@dataclass
+class Feature:
+    """Represents a feature extracted from the whitepaper."""
+    name: str
+    description: str
+    section: str
+
+
 class WhitepaperProcessor:
     """Processes and analyzes project whitepapers."""
     
@@ -34,49 +44,233 @@ class WhitepaperProcessor:
         self.logger = logging.getLogger(__name__)
         self.sections: Dict[str, Section] = {}
         self.current_section: Optional[Section] = None
+        self.features: List[Feature] = []
+        self.llm_logger = LLMLogger()
     
-    def load_and_analyze(self, whitepaper_path: str) -> Dict[str, Any]:
+    def load_and_analyze(self, file_path: str) -> Dict[str, Any]:
         """
         Load and analyze a whitepaper file.
         
         Args:
-            whitepaper_path: Path to the whitepaper file
+            file_path: Path to the whitepaper file
             
         Returns:
-            Dictionary containing whitepaper analysis
+            Dictionary containing analysis results
         """
         try:
-            # Read whitepaper content
-            with open(whitepaper_path, 'r', encoding='utf-8') as f:
+            # Start a new LLM logging session
+            self.llm_logger.start_session("whitepaper_processing")
+            
+            # Read the whitepaper content
+            with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Split content into sections
-            sections = self._split_into_sections(content)
+            # Extract features from the entire whitepaper
+            features = self._extract_features(content)
             
-            # Analyze each section
-            for section in sections:
-                self._analyze_section(section)
-            
-            # Build section dependencies
-            self._build_dependencies()
+            # Group features by section
+            features_by_section = {}
+            for feature in features:
+                section = feature.section
+                if section not in features_by_section:
+                    features_by_section[section] = []
+                features_by_section[section].append({
+                    "name": feature.name,
+                    "description": feature.description
+                })
             
             return {
                 "content": content,
-                "sections": {
-                    section.id: {
-                        "title": section.title,
-                        "content": section.content,
-                        "dependencies": section.dependencies,
-                        "status": section.status,
-                        "code_blocks": section.code_blocks,
-                        "file_paths": section.file_paths
-                    }
-                    for section in self.sections.values()
-                }
+                "features": [{"name": f.name, "description": f.description, "section": f.section} for f in features],
+                "features_by_section": features_by_section
             }
             
         except Exception as e:
-            self.logger.error(f"Failed to load whitepaper: {str(e)}")
+            self.logger.error(f"Failed to load and analyze whitepaper: {str(e)}")
+            raise
+    
+    def _extract_features(self, content: str) -> List[Feature]:
+        """
+        Extract features from the entire whitepaper content.
+        
+        Args:
+            content: Whitepaper content
+            
+        Returns:
+            List of extracted features
+        """
+        try:
+            # Create prompt for LLM
+            prompt = f"""Analyze this whitepaper and extract all actionable features and requirements.
+Focus on concrete, implementable items. Group them into logical categories.
+
+Whitepaper content:
+{content}
+
+Provide your analysis in this format:
+FEATURES:
+- Feature 1: <description>
+- Feature 2: <description>
+...
+
+APIs/ENDPOINTS:
+- API 1: <description>
+- API 2: <description>
+...
+
+UI COMPONENTS:
+- Component 1: <description>
+- Component 2: <description>
+...
+
+LOGIC/ALGORITHMS:
+- Logic 1: <description>
+- Logic 2: <description>
+...
+
+Ignore these sections:
+- Abstract
+- Introduction
+- Background
+- Related Work
+- Future Work
+- Conclusion
+- References
+- Appendix"""
+            
+            # Get response from LLM
+            response = self._get_llm_response(
+                "You are a code analysis expert. Extract actionable features and requirements from the whitepaper.",
+                prompt
+            )
+            
+            # Parse response into features
+            features = []
+            current_section = None
+            current_content = []
+            
+            for line in response.split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                if line.startswith('FEATURES:'):
+                    if current_section and current_content:
+                        features.extend(self._process_section(current_section, current_content))
+                    current_section = 'features'
+                    current_content = []
+                elif line.startswith('APIs/ENDPOINTS:'):
+                    if current_section and current_content:
+                        features.extend(self._process_section(current_section, current_content))
+                    current_section = 'apis'
+                    current_content = []
+                elif line.startswith('UI COMPONENTS:'):
+                    if current_section and current_content:
+                        features.extend(self._process_section(current_section, current_content))
+                    current_section = 'ui'
+                    current_content = []
+                elif line.startswith('LOGIC/ALGORITHMS:'):
+                    if current_section and current_content:
+                        features.extend(self._process_section(current_section, current_content))
+                    current_section = 'logic'
+                    current_content = []
+                elif line.startswith('- '):
+                    current_content.append(line[2:])
+            
+            # Process final section
+            if current_section and current_content:
+                features.extend(self._process_section(current_section, current_content))
+                
+            return features
+            
+        except Exception as e:
+            self.logger.error(f"Failed to extract features: {str(e)}")
+            return []
+    
+    def _process_section(self, section: str, content: List[str]) -> List[Feature]:
+        """
+        Process a section of the LLM response.
+        
+        Args:
+            section: Section type (features, apis, ui, logic)
+            content: List of items in the section
+            
+        Returns:
+            List of processed features
+        """
+        features = []
+        for item in content:
+            features.append(Feature(
+                name=f"{section.title()} - {item.split(':')[0].strip()}",
+                description=item,
+                section=section
+            ))
+        return features
+    
+    def _get_llm_response(self, system_prompt: str, user_prompt: str) -> str:
+        """Get response from OpenAI's GPT-4 model."""
+        try:
+            import os
+            from openai import OpenAI
+            from dotenv import load_dotenv
+            import httpx
+            
+            # Load environment variables from .env file
+            load_dotenv()
+            
+            # Get API key
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not found in environment variables")
+            
+            # Create a custom transport without proxies
+            transport = httpx.HTTPTransport(retries=3)
+            
+            # Initialize OpenAI client with custom transport
+            client = OpenAI(
+                api_key=api_key,
+                http_client=httpx.Client(transport=transport)
+            )
+            
+            # Format the prompt with system and user messages
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            # Get response from OpenAI's API
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.7,
+                max_tokens=4000
+            )
+            
+            response_content = response.choices[0].message.content
+            
+            # Log the interaction
+            metadata = {
+                "model": "gpt-4o-mini",
+                "temperature": 0.7,
+                "max_tokens": 4000,
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
+            }
+            
+            self.llm_logger.log_interaction(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response=response_content,
+                metadata=metadata
+            )
+            
+            return response_content
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get LLM response: {str(e)}")
             raise
     
     def _split_into_sections(self, content: str) -> List[Section]:

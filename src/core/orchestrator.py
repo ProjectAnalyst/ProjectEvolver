@@ -200,6 +200,9 @@ class ProjectEvolver:
         # Set repository path for codebase analyzer
         self.codebase_analyzer.set_repo_path(repo_path)
         
+        # Pass whitepaper features to codebase analyzer
+        self.codebase_analyzer.set_whitepaper_features(whitepaper.get("features", []))
+        
         # Scan current codebase
         self.logger.info("Scanning current codebase...")
         current_state = self.codebase_analyzer.scan_codebase()
@@ -209,14 +212,6 @@ class ProjectEvolver:
         self.logger.info("Identifying gaps between current state and whitepaper requirements...")
         gaps = self.gap_analyzer.identify_gaps(whitepaper, current_state)
         self.logger.info(f"Identified {len(gaps)} gaps")
-        for gap in gaps:
-            self.logger.info(f"Gap: {gap.description}")
-            self.logger.info(f"  Type: {gap.type}")
-            self.logger.info(f"  Priority: {gap.priority}")
-            self.logger.info(f"  Affected files: {gap.affected_files}")
-            self.logger.info(f"  Requirements: {gap.requirements}")
-            self.logger.info(f"  Current state: {gap.current_state}")
-            self.logger.info(f"  Desired state: {gap.desired_state}")
         
         return gaps
     
