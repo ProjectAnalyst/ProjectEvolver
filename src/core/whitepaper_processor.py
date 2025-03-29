@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import uuid
 from dataclasses import dataclass
+import ast
 
 
 @dataclass
@@ -153,15 +154,83 @@ class WhitepaperProcessor:
         # Store section
         self.sections[section.id] = section
         
-        # Extract features from bullet points
-        features = re.findall(r'[-*]\s+(.*)', section.content)
-        section.features = features
+        # Extract features using semantic analysis
+        features = []
         
-        # Extract code requirements
+        # Split content into meaningful chunks
+        paragraphs = [p.strip() for p in section.content.split('\n\n') if p.strip()]
+        
+        for paragraph in paragraphs:
+            # Process each line in the paragraph
+            lines = [line.strip() for line in paragraph.split('\n') if line.strip()]
+            for line in lines:
+                # Clean up the line
+                cleaned_line = re.sub(r'[-*•]', '', line).strip()
+                
+                # Analyze the line for potential features/requirements
+                if any(indicator in cleaned_line.lower() for indicator in [
+                    'implement', 'add', 'create', 'support', 'enable', 'provide',
+                    'should', 'must', 'needs to', 'requires', 'shall', 'will',
+                    'feature', 'functionality', 'capability'
+                ]):
+                    features.append(cleaned_line)
+        
+        # Process code blocks for technical requirements
         code_requirements = []
         for code_block in section.code_blocks:
             if code_block.startswith('python'):
-                code_requirements.append(code_block[7:])
+                code_block_content = code_block[7:]
+                code_requirements.append(code_block_content)
+                
+                try:
+                    tree = ast.parse(code_block_content)
+                    
+                    # Extract function/class definitions
+                    for node in ast.walk(tree):
+                        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                            # Get docstring if available
+                            docstring = ast.get_docstring(node)
+                            if docstring:
+                                features.append(f"{node.name}: {docstring.split('.')[0]}")
+                            else:
+                                features.append(f"{node.name}")
+                            
+                            # Analyze function parameters and return annotations
+                            if isinstance(node, ast.FunctionDef):
+                                if node.returns:
+                                    features.append(f"{node.name} returns {ast.unparse(node.returns)}")
+                                
+                                for arg in node.args.args:
+                                    if arg.annotation:
+                                        features.append(f"{node.name} requires {arg.arg}: {ast.unparse(arg.annotation)}")
+                except:
+                    pass
+        
+        # Extract API endpoints or routes
+        route_patterns = [
+            r'@\w+\.route\([\'"]([^\'"]+)[\'"]\)',  # Flask/FastAPI style
+            r'path=[\'"]([^\'"]+)[\'"]',  # Django style
+            r'URL:\s*[\'"]([^\'"]+)[\'"]',  # Generic URL documentation
+        ]
+        
+        for pattern in route_patterns:
+            routes = re.findall(pattern, section.content)
+            for route in routes:
+                features.append(f"API endpoint: {route}")
+        
+        # Clean up and deduplicate features
+        cleaned_features = []
+        seen = set()
+        
+        for feature in features:
+            # Normalize feature text
+            normalized = ' '.join(feature.lower().split())
+            if normalized not in seen:
+                seen.add(normalized)
+                cleaned_features.append(feature)
+        
+        # Store extracted features and requirements
+        section.features = cleaned_features
         section.code_requirements = code_requirements
     
     def _build_dependencies(self) -> None:

@@ -6,11 +6,25 @@ It uses the Cursor Pro API to generate and modify code.
 """
 
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
 import ast
 import black
 import isort
+import difflib
+from dataclasses import dataclass
+import re
+
+
+@dataclass
+class CodeChange:
+    """Represents a specific code change."""
+    file_path: str
+    start_line: int
+    end_line: int
+    new_content: str
+    change_type: str  # 'insert', 'replace', 'delete'
+    context: Dict[str, Any]
 
 
 class CodeGenerator:
@@ -20,8 +34,75 @@ class CodeGenerator:
         """Initialize the code generator."""
         self.logger = logging.getLogger(__name__)
         self.context: Dict[str, Any] = {}
+        self.codebase_structure: Dict[str, Any] = {}
+        self.import_graph: Dict[str, List[str]] = {}
     
-    def generate_changes(self, task: Any) -> Dict[str, str]:
+    def analyze_codebase(self, root_dir: str) -> None:
+        """
+        Analyze the codebase structure.
+        
+        Args:
+            root_dir: Root directory of the codebase
+        """
+        try:
+            root_path = Path(root_dir)
+            self._analyze_directory(root_path)
+            self._build_import_graph()
+            self.logger.info("Codebase analysis completed")
+        except Exception as e:
+            self.logger.error(f"Failed to analyze codebase: {str(e)}")
+            raise
+    
+    def _analyze_directory(self, directory: Path) -> None:
+        """Analyze a directory and its contents."""
+        for item in directory.iterdir():
+            if item.is_file() and item.suffix == '.py':
+                self._analyze_file(item)
+            elif item.is_dir() and not item.name.startswith('.'):
+                self._analyze_directory(item)
+    
+    def _analyze_file(self, file_path: Path) -> None:
+        """Analyze a Python file's structure."""
+        try:
+            with open(file_path, 'r') as f:
+                content = f.read()
+            
+            tree = ast.parse(content)
+            file_info = {
+                'classes': [],
+                'functions': [],
+                'imports': [],
+                'dependencies': set()
+            }
+            
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    file_info['classes'].append({
+                        'name': node.name,
+                        'methods': [n.name for n in node.body if isinstance(n, ast.FunctionDef)],
+                        'line_number': node.lineno
+                    })
+                elif isinstance(node, ast.FunctionDef):
+                    file_info['functions'].append({
+                        'name': node.name,
+                        'line_number': node.lineno
+                    })
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    file_info['imports'].append(ast.unparse(node))
+                    if isinstance(node, ast.ImportFrom):
+                        file_info['dependencies'].add(node.module)
+            
+            self.codebase_structure[str(file_path)] = file_info
+            
+        except Exception as e:
+            self.logger.error(f"Failed to analyze {file_path}: {str(e)}")
+    
+    def _build_import_graph(self) -> None:
+        """Build a graph of module dependencies."""
+        for file_path, info in self.codebase_structure.items():
+            self.import_graph[file_path] = list(info['dependencies'])
+    
+    def generate_changes(self, task: Any) -> Dict[str, List[CodeChange]]:
         """
         Generate code changes for a task.
         
@@ -29,27 +110,24 @@ class CodeGenerator:
             task: Task to generate changes for
             
         Returns:
-            Dictionary mapping file paths to their new content
+            Dictionary mapping file paths to lists of code changes
         """
         try:
-            # Skip if no target files
             if not task.target_files:
                 self.logger.warning(f"No target files specified for task {task.id}")
                 return {}
             
-            # Get current content of target files
             current_content = self._get_current_content(task.target_files)
-            
-            # Generate changes for each file
             changes = {}
+            
             for file_path in task.target_files:
-                new_content = self._generate_file_changes(
+                file_changes = self._generate_file_changes(
                     file_path,
                     current_content.get(file_path, ""),
                     task
                 )
-                if new_content:
-                    changes[file_path] = new_content
+                if file_changes:
+                    changes[file_path] = file_changes
             
             return changes
             
@@ -76,7 +154,7 @@ class CodeGenerator:
                 self.logger.error(f"Failed to read {file_path}: {str(e)}")
         return content
     
-    def _generate_file_changes(self, file_path: str, current_content: str, task: Any) -> Optional[str]:
+    def _generate_file_changes(self, file_path: str, current_content: str, task: Any) -> List[CodeChange]:
         """
         Generate changes for a specific file.
         
@@ -86,140 +164,131 @@ class CodeGenerator:
             task: Task to generate changes for
             
         Returns:
-            New content for the file if changes were made
+            List of code changes
         """
         try:
-            # Parse the current content
+            changes = []
             tree = ast.parse(current_content)
             
-            # Find the main class
-            class_node = None
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef):
-                    class_node = node
-                    break
+            # Analyze existing code structure
+            file_info = self.codebase_structure.get(file_path, {})
+            existing_classes = {c['name']: c for c in file_info.get('classes', [])}
+            existing_functions = {f['name']: f for f in file_info.get('functions', [])}
             
-            if not class_node:
-                self.logger.warning(f"No class found in {file_path}")
-                return None
+            # Generate changes based on requirements
+            for req in task.requirements:
+                if "add method" in req.lower():
+                    # Find the appropriate class to add the method to
+                    target_class = self._find_target_class(req, existing_classes)
+                    if target_class:
+                        new_method = self._generate_method(req, existing_classes[target_class])
+                        changes.append(CodeChange(
+                            file_path=file_path,
+                            start_line=existing_classes[target_class]['line_number'],
+                            end_line=existing_classes[target_class]['line_number'],
+                            new_content=new_method,
+                            change_type='insert',
+                            context={'class': target_class}
+                        ))
+                elif "modify method" in req.lower():
+                    # Find and modify existing method
+                    target_method = self._find_target_method(req, existing_functions)
+                    if target_method:
+                        modified_method = self._modify_method(req, existing_functions[target_method])
+                        changes.append(CodeChange(
+                            file_path=file_path,
+                            start_line=existing_functions[target_method]['line_number'],
+                            end_line=existing_functions[target_method]['line_number'],
+                            new_content=modified_method,
+                            change_type='replace',
+                            context={'method': target_method}
+                        ))
             
-            # Generate new methods based on requirements
-            new_methods = self._generate_implementation(task.requirements, self._get_imports(current_content))
-            
-            # Add new methods to the class
-            new_methods_ast = ast.parse(new_methods)
-            for node in ast.walk(new_methods_ast):
-                if isinstance(node, ast.FunctionDef):
-                    class_node.body.append(node)
-            
-            # Convert back to source code
-            new_content = ast.unparse(tree)
-            
-            # Format the code
-            try:
-                new_content = black.format_str(new_content, mode=black.FileMode())
-                new_content = isort.code(new_content)
-            except Exception as e:
-                self.logger.warning(f"Failed to format code: {str(e)}")
-            
-            return new_content
+            return changes
             
         except Exception as e:
             self.logger.error(f"Failed to generate changes for {file_path}: {str(e)}")
-            return None
-    
-    def _get_imports(self, content: str) -> List[str]:
-        """
-        Extract imports from content.
-        
-        Args:
-            content: File content
-            
-        Returns:
-            List of import statements
-        """
-        try:
-            tree = ast.parse(content)
-            imports = []
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.Import, ast.ImportFrom)):
-                    imports.append(ast.unparse(node))
-            return imports
-        except Exception:
             return []
     
-    def _generate_implementation(self, requirements: List[str], existing_imports: List[str]) -> str:
+    def _find_target_class(self, requirement: str, existing_classes: Dict[str, Any]) -> Optional[str]:
+        """Find the most appropriate class to add a method to."""
+        # Use context and requirement analysis to find the best class
+        # This is a simplified version - you might want to make it more sophisticated
+        for class_name, class_info in existing_classes.items():
+            if any(method in requirement.lower() for method in class_info['methods']):
+                return class_name
+        return list(existing_classes.keys())[0] if existing_classes else None
+    
+    def _find_target_method(self, requirement: str, existing_functions: Dict[str, Any]) -> Optional[str]:
+        """Find the method to modify based on the requirement."""
+        # Use context and requirement analysis to find the best method
+        for func_name, func_info in existing_functions.items():
+            if func_name.lower() in requirement.lower():
+                return func_name
+        return None
+    
+    def _generate_method(self, requirement: str, class_info: Dict[str, Any]) -> str:
+        """Generate a new method based on the requirement."""
+        # This is where you'd use your AI model to generate the method
+        # For now, we'll use a simple template
+        method_name = self._extract_method_name(requirement)
+        return f"""
+    def {method_name}(self):
+        \"\"\"Generated method based on requirement: {requirement}\"\"\"
+        # TODO: Implement method
+        pass
+"""
+    
+    def _modify_method(self, requirement: str, method_info: Dict[str, Any]) -> str:
+        """Modify an existing method based on the requirement."""
+        # This is where you'd use your AI model to modify the method
+        # For now, we'll use a simple template
+        return f"""
+    def {method_info['name']}(self):
+        \"\"\"Modified method based on requirement: {requirement}\"\"\"
+        # TODO: Implement modifications
+        pass
+"""
+    
+    def _extract_method_name(self, requirement: str) -> str:
+        """Extract a method name from a requirement."""
+        # Convert requirement to snake_case method name
+        words = requirement.lower().split()
+        return '_'.join(words)
+    
+    def apply_changes(self, changes: Dict[str, List[CodeChange]]) -> None:
         """
-        Generate implementation based on requirements.
+        Apply the generated changes to the files.
         
         Args:
-            requirements: List of requirements
-            existing_imports: List of existing imports
-            
-        Returns:
-            Generated code
+            changes: Dictionary mapping file paths to lists of code changes
         """
-        code_parts = []
-        
-        for req in requirements:
-            if "collision detection" in req.lower():
-                code_parts.append("""
-    def check_collision(self) -> bool:
-        \"\"\"Check for collisions with walls and self.\"\"\"
-        head = self.body[0]
-        
-        # Check wall collision
-        if head[0] < 0 or head[0] >= self.width or head[1] < 0 or head[1] >= self.height:
-            return True
-        
-        # Check self collision
-        if head in self.body[1:]:
-            return True
-        
-        return False
-""")
-            elif "frame rate control" in req.lower():
-                code_parts.append("""
-    def maintain_frame_rate(self):
-        \"\"\"Maintain consistent frame rate.\"\"\"
-        self.clock.tick(self.fps)
-        pygame.time.wait(1)  # Small delay to prevent CPU overuse
-""")
-            elif "game speed" in req.lower():
-                code_parts.append("""
-    def update_speed(self):
-        \"\"\"Update game speed based on score.\"\"\"
-        self.speed = min(self.base_speed + (self.score // 10) * self.speed_increment, self.max_speed)
-""")
-            elif "error handling" in req.lower():
-                code_parts.append("""
-    def handle_error(self, error: Exception):
-        \"\"\"Handle game errors gracefully.\"\"\"
-        self.logger.error(f"Game error: {str(error)}")
-        self.game_over = True
-        self.error_message = str(error)
-""")
-            elif "game state" in req.lower():
-                code_parts.append("""
-    def save_game_state(self):
-        \"\"\"Save current game state.\"\"\"
-        state = {
-            "score": self.score,
-            "snake": self.snake.body,
-            "food": self.food.position,
-            "speed": self.speed
-        }
-        return state
-
-    def load_game_state(self, state: dict):
-        \"\"\"Load saved game state.\"\"\"
-        self.score = state["score"]
-        self.snake.body = state["snake"]
-        self.food.position = state["food"]
-        self.speed = state["speed"]
-""")
-        
-        return "\n".join(code_parts)
+        for file_path, file_changes in changes.items():
+            try:
+                with open(file_path, 'r') as f:
+                    content = f.read().splitlines()
+                
+                # Sort changes by line number in reverse order to avoid offset issues
+                file_changes.sort(key=lambda x: x.start_line, reverse=True)
+                
+                for change in file_changes:
+                    new_lines = change.new_content.strip().splitlines()
+                    if change.change_type == 'insert':
+                        content.insert(change.start_line - 1, *new_lines)
+                    elif change.change_type == 'replace':
+                        content[change.start_line - 1:change.end_line] = new_lines
+                    elif change.change_type == 'delete':
+                        del content[change.start_line - 1:change.end_line]
+                
+                # Write the modified content back to the file
+                with open(file_path, 'w') as f:
+                    f.write('\n'.join(content))
+                
+                # Re-analyze the file
+                self._analyze_file(Path(file_path))
+                
+            except Exception as e:
+                self.logger.error(f"Failed to apply changes to {file_path}: {str(e)}")
     
     def validate_code(self, code: str) -> bool:
         """
@@ -232,7 +301,6 @@ class CodeGenerator:
             True if code is valid, False otherwise
         """
         try:
-            # Try to parse the code
             ast.parse(code)
             return True
         except SyntaxError:

@@ -176,17 +176,18 @@ class ProjectEvolver:
         """
         self.logger.info("Starting project analysis...")
         
-        # Clone repository if needed
-        if not self.git_operator.is_repo_initialized():
-            self.logger.info("Repository not initialized, cloning...")
-            self.git_operator.clone_repository(repo_url)
-        else:
-            self.logger.info("Repository already exists, skipping clone")
+        # Extract repository name from URL
+        repo_name = repo_url.split('/')[-1].replace('.git', '')
+        repo_path = Path(repo_name)
+        
+        # Always try to clone/update the repository
+        self.logger.info(f"Cloning/updating repository: {repo_url}")
+        if not self.git_operator.clone_repository(repo_url):
+            raise Exception(f"Failed to clone/update repository: {repo_url}")
         
         # Find whitepaper automatically if not provided
         if not whitepaper_path:
-            repo_name = repo_url.split('/')[-1].replace('.git', '')
-            whitepaper_path = Path(repo_name) / "docs" / "whitepaper.md"
+            whitepaper_path = repo_path / "docs" / "whitepaper.md"
             if not whitepaper_path.exists():
                 raise FileNotFoundError(f"Could not find whitepaper at {whitepaper_path}")
             self.logger.info(f"Found whitepaper at: {whitepaper_path}")
@@ -197,7 +198,6 @@ class ProjectEvolver:
         self.logger.info("Whitepaper analysis complete")
         
         # Set repository path for codebase analyzer
-        repo_path = Path(repo_url.split('/')[-1].replace('.git', ''))
         self.codebase_analyzer.set_repo_path(repo_path)
         
         # Scan current codebase

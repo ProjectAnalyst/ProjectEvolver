@@ -309,7 +309,7 @@ class GitOperator:
     
     def clone_repository(self, repo_url: str) -> bool:
         """
-        Clone a GitHub repository.
+        Clone a GitHub repository or update if it exists.
         
         Args:
             repo_url: GitHub repository URL or username/repo format
@@ -336,10 +336,19 @@ class GitOperator:
             target_path = self.repo_path / repo_name
             print(f"Attempting to clone repository to: {target_path}")
             
-            # Ensure the target directory doesn't exist
+            # Check if repository exists
             if target_path.exists():
-                print(f"Target directory {target_path} already exists")
-                return False
+                print(f"Repository already exists at {target_path}, updating...")
+                # Update existing repository
+                self.repo_path = target_path
+                if not self._run_git_command(["fetch", "origin"]):
+                    print("Failed to fetch updates")
+                    return False
+                if not self._run_git_command(["reset", "--hard", "origin/main"]):
+                    print("Failed to reset to latest changes")
+                    return False
+                print("Successfully updated repository")
+                return True
             
             # Clone the repository
             result = subprocess.run(

@@ -1,16 +1,30 @@
-pytest==7.4.4
-black==24.2.0
-isort==5.13.2
+# Core dependencies
 python-dotenv==1.0.1
 GitPython==3.1.42
-fastapi==0.110.0
 typing-extensions==4.10.0
-pathlib==1.0.1
-shutil==1.7.0
-logging==0.5.1.2
 requests>=2.28.0
 pydantic>=2.5.0
-openai>=1.3.0
+
+# Code analysis and formatting
+black==24.2.0
+isort==5.13.2
 flake8>=6.1.0
-pygame>=2.5.0
-python-dateutil>=2.8.2 
+
+# Testing
+pytest==7.4.4
+
+# API and web
+fastapi==0.110.0
+
+# Date handling
+python-dateutil>=2.8.2
+
+# Machine learning and embeddings
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# Cursor integration
+cursor>=0.1.0  # For Cursor IDE LLM integration
+
+# Optional: OpenAI (fallback if Cursor LLM is not available)
+openai>=1.3.0 
