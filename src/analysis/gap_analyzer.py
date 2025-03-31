@@ -41,8 +41,8 @@ class GapAnalyzer:
     def __init__(self):
         """Initialize the gap analyzer."""
         self.logger = logging.getLogger(__name__)
-        self.gaps: List[Gap] = []
-        self.codebase_index: Dict[str, Any] = {}
+        self.gaps = []  # This will store our gaps
+        self.codebase_index = {}
         self.codebase_analyzer = CodebaseAnalyzer()
         self.llm_logger = LLMLogger()
         self.file_contents = {}
@@ -77,11 +77,9 @@ class GapAnalyzer:
     def identify_gaps(self, whitepaper: Dict[str, Any], codebase_index: Dict[str, Any]) -> List[Gap]:
         """Compare all whitepaper requirements against the codebase index in a single analysis."""
         try:
-            # Start a new LLM logging session for gap analysis
             self.llm_logger.start_session("gap_analysis")
             self.logger.info("Starting gap analysis")
             
-            # Format the features from whitepaper
             features = whitepaper.get("features", [])
             features_text = "\n".join(
                 f"Feature: {feature['name']}\n"
@@ -89,7 +87,6 @@ class GapAnalyzer:
                 for feature in features
             )
             
-            # Create a single analysis prompt
             prompt = f"""Analyze which features from the whitepaper are implemented in the codebase:
 
 WHITEPAPER FEATURES:
@@ -109,17 +106,12 @@ CONFIDENCE: <high/medium/low>
 Analyze each feature separately, but consider relationships between features when relevant.
 """
             
-            # Get analysis for all features at once
             response = self._get_llm_response(
                 "You are a code analysis expert. Analyze implementation status of multiple features.",
                 prompt
             )
             
-            # Parse the response into individual gaps
-            self.gaps = self._parse_multi_feature_analysis(response, features)
-            
-            self.logger.info(f"Identified {len(self.gaps)} gaps")
-            return self.gaps
+            return self._parse_multi_feature_analysis(response, features)
             
         except Exception as e:
             self.logger.error(f"Failed to identify gaps: {str(e)}")
@@ -140,49 +132,48 @@ Analyze each feature separately, but consider relationships between features whe
         current_feature = None
         current_analysis = {}
         
-        self.logger.debug(f"Starting to parse analysis for {total_features} features")
+        # DEBUG: Print the entire response
+        print("DEBUG - FULL RESPONSE:")
+        print(response)
         
         for line in response.split('\n'):
             line = line.strip()
             if not line:
                 continue
             
-            self.logger.debug(f"Processing line: {line}")
-            
             if line.startswith('FEATURE:'):
+                # DEBUG: Print when we find a feature
+                print(f"DEBUG - Found feature line: {line}")
+                
                 # Save previous feature analysis if it exists
                 if current_feature and current_analysis:
-                    self.logger.debug(f"Current status: {current_analysis.get('status', 'unknown')}")
-                    if current_analysis.get("status", "").lower() not in ["fully implemented", "fully"]:
-                        self.logger.debug(f"Creating gap for {current_feature['name']}")
-                        gap = self._create_gap(
-                            feature=current_feature,
-                            status=current_analysis.get("status", "not"),
-                            confidence=current_analysis.get("confidence", "medium"),
-                            reason=current_analysis.get("reason", ""),
-                            missing_components=current_analysis.get("missing_components", [])
-                        )
+                    status = current_analysis.get("status", "").lower()
+                    print(f"DEBUG - Processing feature {current_feature.get('name')} with status {status}")
+                    
+                    if "fully implemented" not in status and "fully" != status:
+                        gap = {
+                            "name": current_feature.get("name", "Unknown"),
+                            "status": current_analysis.get("status", "not implemented"),
+                            "description": current_feature.get("description", ""),
+                            "reason": current_analysis.get("reason", ""),
+                            "missing_components": current_analysis.get("missing_components", []),
+                            "confidence": current_analysis.get("confidence", "medium")
+                        }
                         gaps.append(gap)
+                        print(f"DEBUG - Added gap for {gap['name']} with status {gap['status']}")
                 
                 # Start new feature analysis
                 feature_name = line.replace('FEATURE:', '').strip()
-                self.logger.debug(f"Starting analysis of feature: {feature_name}")
-                current_feature = next(
-                    (f for f in features if f["name"].endswith(feature_name)), 
-                    {"name": feature_name, "description": ""}
-                )
+                current_feature = {"name": feature_name, "description": ""}
                 current_analysis = {}
                 
             elif line.startswith('STATUS:'):
-                status = line.split(':', 1)[1].strip().lower()
+                status = line.split(':', 1)[1].strip()
                 current_analysis["status"] = status
-                self.logger.debug(f"Found status: {status}")
+                print(f"DEBUG - Found status: {status}")
+                
             elif line.startswith('REASON:'):
                 current_analysis["reason"] = line.split(':', 1)[1].strip()
-            elif line.startswith('FOUND IN:'):
-                found_in = line.split(':', 1)[1].strip()
-                if found_in and found_in.lower() != "none":
-                    current_analysis["found_in"] = [item.strip() for item in found_in.split(',')]
             elif line.startswith('MISSING COMPONENTS:'):
                 missing = line.split(':', 1)[1].strip()
                 if missing and missing.lower() != "none":
@@ -190,23 +181,30 @@ Analyze each feature separately, but consider relationships between features whe
             elif line.startswith('CONFIDENCE:'):
                 current_analysis["confidence"] = line.split(':', 1)[1].strip()
         
-        # Process the last feature if needed
+        # Process the last feature
         if current_feature and current_analysis:
-            self.logger.debug(f"Processing final feature: {current_feature['name']} with status {current_analysis.get('status', 'unknown')}")
-            if current_analysis.get("status", "").lower() not in ["fully implemented", "fully"]:
-                gap = self._create_gap(
-                    feature=current_feature,
-                    status=current_analysis.get("status", "not"),
-                    confidence=current_analysis.get("confidence", "medium"),
-                    reason=current_analysis.get("reason", ""),
-                    missing_components=current_analysis.get("missing_components", [])
-                )
+            status = current_analysis.get("status", "").lower()
+            print(f"DEBUG - Processing final feature {current_feature.get('name')} with status {status}")
+            
+            if "fully implemented" not in status and "fully" != status:
+                gap = {
+                    "name": current_feature.get("name", "Unknown"),
+                    "status": current_analysis.get("status", "not implemented"),
+                    "description": current_feature.get("description", ""),
+                    "reason": current_analysis.get("reason", ""),
+                    "missing_components": current_analysis.get("missing_components", []),
+                    "confidence": current_analysis.get("confidence", "medium")
+                }
                 gaps.append(gap)
+                print(f"DEBUG - Added final gap for {gap['name']} with status {gap['status']}")
         
-        self.logger.debug(f"Found {len(gaps)} gaps")
-        self.logger.info(f"Identified {len(gaps)} gaps out of {total_features} total features")
+        print(f"DEBUG - FINAL GAPS LIST: {gaps}")
         
-        return gaps
+        # Store gaps and log ONLY ONCE
+        self.gaps = gaps
+        print(f"DEBUG - Stored {len(self.gaps)} gaps in self.gaps")
+        
+        return self.gaps
 
     def _format_codebase_analysis(self, codebase_index: Dict[str, Any]) -> str:
         """Format codebase analysis for LLM prompt."""

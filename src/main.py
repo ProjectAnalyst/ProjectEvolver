@@ -5,6 +5,9 @@ from .analysis.codebase_analyzer import CodebaseAnalyzer
 from .utils.git_manager import GitManager
 from datetime import datetime
 from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 
 def main():
     # Set up argument parser
@@ -40,9 +43,9 @@ def main():
         codebase_analyzer = CodebaseAnalyzer()
         
         # Analyze codebase
-        print("Analyzing codebase...")
+        logger.info("Starting analysis phase...")
         current_state = codebase_analyzer.analyze_codebase(args.repo_path)
-        print(f"Found {len(current_state)} files in codebase")
+        logger.info(f"Found {len(current_state)} files in codebase")
         
         # Set the analyzed codebase in gap analyzer
         gap_analyzer.codebase_index = current_state
@@ -54,8 +57,8 @@ def main():
             return 1
             
         # Analyze gaps
-        print("Identifying gaps...")
-        gaps = gap_analyzer.identify_gaps(whitepaper, current_state)
+        logger.info("Starting planning phase...")
+        gaps = gap_analyzer.identify_gaps(whitepaper_path, current_state)
         
         # Sort gaps by priority
         prioritized_gaps = sorted(gaps, key=lambda g: g.priority, reverse=True)
