@@ -14,6 +14,8 @@ import isort
 import difflib
 from dataclasses import dataclass
 import re
+from ..analysis.feature_analyzer import ImplementationPlan
+from .context_manager import ContextManager
 
 
 @dataclass
@@ -32,6 +34,7 @@ class CodeGenerator:
     
     def __init__(self):
         """Initialize the code generator."""
+        self.context_manager = ContextManager()
         self.logger = logging.getLogger(__name__)
         self.context: Dict[str, Any] = {}
         self.codebase_structure: Dict[str, Any] = {}
@@ -102,38 +105,44 @@ class CodeGenerator:
         for file_path, info in self.codebase_structure.items():
             self.import_graph[file_path] = list(info['dependencies'])
     
-    def generate_changes(self, task: Any) -> Dict[str, List[CodeChange]]:
-        """
-        Generate code changes for a task.
+    def generate_changes(self, plan: ImplementationPlan, codebase_root: Path) -> Dict[str, Any]:
+        """Generate code changes based on implementation plan."""
+        # Get relevant context
+        context = self.context_manager.get_relevant_context(plan, codebase_root)
         
-        Args:
-            task: Task to generate changes for
-            
-        Returns:
-            Dictionary mapping file paths to lists of code changes
-        """
-        try:
-            if not task.target_files:
-                self.logger.warning(f"No target files specified for task {task.id}")
-                return {}
-            
-            current_content = self._get_current_content(task.target_files)
-            changes = {}
-            
-            for file_path in task.target_files:
-                file_changes = self._generate_file_changes(
-                    file_path,
-                    current_content.get(file_path, ""),
-                    task
-                )
-                if file_changes:
-                    changes[file_path] = file_changes
-            
-            return changes
-            
-        except Exception as e:
-            self.logger.error(f"Failed to generate changes: {str(e)}")
-            raise
+        prompt = f"""Generate implementation code based on this plan and context:
+
+IMPLEMENTATION PLAN:
+{self._format_plan(plan)}
+
+PRIMARY FILES:
+{self._format_primary_context(context['primary_files'])}
+
+RELATED CONTEXT:
+{self._format_related_context(context['related_files'])}
+
+PROJECT PATTERNS:
+{self._format_patterns(context['project_patterns'])}
+
+Generate complete, implementation-ready code that:
+1. Follows existing project patterns
+2. Maintains compatibility with related code
+3. Includes proper error handling and tests
+4. Documents changes clearly
+
+Format your response as:
+---FILE: <filename>---
+```python
+<complete file content>
+```
+"""
+        
+        response = self._get_llm_response(
+            "You are an expert code implementer. Generate production-ready code that integrates seamlessly with the existing codebase.",
+            prompt
+        )
+        
+        return self._parse_changes(response)
     
     def _get_current_content(self, file_paths: List[str]) -> Dict[str, str]:
         """
@@ -322,4 +331,108 @@ class CodeGenerator:
         Returns:
             Current context dictionary
         """
-        return self.context.copy() 
+        return self.context.copy()
+    
+    def _format_plan(self, plan: ImplementationPlan) -> str:
+        """Format implementation plan for LLM prompt."""
+        return f"""
+Feature: {plan.feature_name}
+Status: {plan.status}
+Current State: {plan.current_state}
+Required Changes:
+{chr(10).join(f"- {change}" for change in plan.required_changes)}
+Implementation Approach: {plan.implementation_approach}
+Affected Files: {', '.join(plan.affected_files)}
+Dependencies: {', '.join(plan.dependencies)}
+Priority: {plan.priority}
+"""
+        
+    def _format_primary_context(self, primary_files: Dict[str, Any]) -> str:
+        """Format primary files context for LLM prompt."""
+        formatted = []
+        for file_path, context in primary_files.items():
+            formatted.append(f"\nFile: {file_path}")
+            formatted.append("Classes:")
+            for cls in context['classes']:
+                formatted.append(f"- {cls['name']} (line {cls['line_number']})")
+                formatted.append(f"  Methods: {', '.join(cls['methods'])}")
+            formatted.append("Functions:")
+            for func in context['functions']:
+                formatted.append(f"- {func['name']} (line {func['line_number']})")
+            formatted.append("Imports:")
+            for imp in context['imports']:
+                formatted.append(f"- {imp}")
+        return "\n".join(formatted)
+        
+    def _format_related_context(self, related_files: Dict[str, Any]) -> str:
+        """Format related files context for LLM prompt."""
+        formatted = []
+        for file_path, context in related_files.items():
+            formatted.append(f"\nRelated File: {file_path}")
+            formatted.append("Classes:")
+            for cls in context['classes']:
+                formatted.append(f"- {cls['name']}")
+            formatted.append("Functions:")
+            for func in context['functions']:
+                formatted.append(f"- {func['name']}")
+        return "\n".join(formatted)
+        
+    def _format_patterns(self, patterns: Dict[str, Any]) -> str:
+        """Format project patterns for LLM prompt."""
+        formatted = []
+        formatted.append("\nProject Patterns:")
+        formatted.append("Import Style:")
+        for key, value in patterns['import_style'].items():
+            formatted.append(f"- {key}: {value}")
+        formatted.append("\nNaming Conventions:")
+        for key, value in patterns['naming_conventions'].items():
+            formatted.append(f"- {key}: {value}")
+        formatted.append("\nError Handling:")
+        for key, value in patterns['error_handling'].items():
+            formatted.append(f"- {key}: {value}")
+        return "\n".join(formatted)
+        
+    def _parse_changes(self, response: str) -> Dict[str, List[CodeChange]]:
+        """Parse LLM response into code changes."""
+        changes = {}
+        current_file = None
+        current_content = []
+        
+        for line in response.split('\n'):
+            if line.startswith('---FILE:'):
+                if current_file and current_content:
+                    changes[current_file] = self._create_code_changes(current_file, '\n'.join(current_content))
+                    current_content = []
+                current_file = line.replace('---FILE:', '').strip()
+            elif line.startswith('CHANGES EXPLAINED:'):
+                if current_file and current_content:
+                    changes[current_file] = self._create_code_changes(current_file, '\n'.join(current_content))
+                break
+            elif current_file:
+                current_content.append(line)
+                
+        return changes
+        
+    def _create_code_changes(self, file_path: str, content: str) -> List[CodeChange]:
+        """Create CodeChange objects from file content."""
+        try:
+            tree = ast.parse(content)
+            changes = []
+            
+            # Analyze the AST to determine change types and line numbers
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+                    changes.append(CodeChange(
+                        file_path=file_path,
+                        start_line=node.lineno,
+                        end_line=node.end_lineno or node.lineno,
+                        new_content=ast.unparse(node),
+                        change_type='replace',
+                        context={'type': type(node).__name__}
+                    ))
+                    
+            return changes
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create code changes for {file_path}: {str(e)}")
+            return [] 

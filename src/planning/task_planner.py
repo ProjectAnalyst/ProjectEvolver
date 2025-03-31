@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import uuid
 
 from ..analysis.gap_analyzer import Gap
+from ..utils.llm_logger import LLMLogger
 
 @dataclass
 class Task:
@@ -32,53 +33,182 @@ class TaskPlanner:
     def __init__(self):
         """Initialize the TaskPlanner."""
         self.logger = logging.getLogger(__name__)
+        self.llm_logger = LLMLogger()
     
-    def create_tasks(self, gaps: List[Gap]) -> List[Task]:
+    def _get_llm_response(self, system_prompt: str, user_prompt: str) -> str:
         """
-        Create tasks from identified gaps.
+        Get response from OpenAI's GPT-4 model.
         
         Args:
-            gaps: List of identified gaps
+            system_prompt: The system prompt for the LLM
+            user_prompt: The user prompt for the LLM
             
         Returns:
-            List of created tasks
+            str: The LLM's response
         """
+        try:
+            # Start a new session for task planning
+            self.llm_logger.start_session("task_planning")
+            
+            import os
+            from openai import OpenAI
+            from dotenv import load_dotenv
+            import httpx
+            
+            # Load environment variables
+            load_dotenv()
+            
+            # Get API key
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not found in environment variables")
+            
+            # Create transport
+            transport = httpx.HTTPTransport(retries=3)
+            
+            # Initialize OpenAI client
+            client = OpenAI(
+                api_key=api_key,
+                http_client=httpx.Client(transport=transport)
+            )
+            
+            # Format messages
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            # Get response
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.7,
+                max_tokens=4000
+            )
+            
+            response_content = response.choices[0].message.content
+            
+            # Log the interaction
+            metadata = {
+                "model": "gpt-4o-mini",
+                "temperature": 0.7,
+                "max_tokens": 4000,
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
+            }
+            
+            self.llm_logger.log_interaction(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response=response_content,
+                metadata=metadata
+            )
+            
+            return response_content
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get LLM response: {str(e)}")
+            raise
+    
+    def create_tasks(self, gaps: List[Gap]) -> List[Task]:
+        """Create tasks from identified gaps."""
         tasks = []
         
         for gap in gaps:
             try:
-                task = self._create_task_from_gap(gap)
+                # Create implementation prompt
+                prompt = f"""Create a detailed implementation task for this gap:
+
+FEATURE GAP:
+Name: {gap.section}
+Description: {gap.description}
+Status: {gap.status}
+Missing Components: {', '.join(gap.missing_components)}
+
+Requirements:
+{chr(10).join(f'- {req}' for req in gap.requirements)}
+
+Current Implementation Details:
+{gap.implementation_details.get('suggested_code', 'No code suggestion available')}
+
+Create a specific, actionable task that includes:
+1. Clear acceptance criteria
+2. Technical approach
+3. Testing requirements
+4. Estimated complexity (1-5)
+5. Dependencies (if any)
+"""
+                
+                response = self._get_llm_response(
+                    "You are a technical project manager. Create detailed implementation tasks.",
+                    prompt
+                )
+                
+                # Parse response and create task
+                task = self._parse_task_response(response, gap)
                 tasks.append(task)
-                self.logger.info(f"Created task: {task.description}")
+                self.logger.info(f"Created task for gap: {gap.section}")
+                
             except Exception as e:
                 self.logger.error(f"Failed to create task from gap: {str(e)}")
                 continue
         
         return tasks
     
-    def _create_task_from_gap(self, gap: Gap) -> Task:
-        """
-        Create a task from a gap.
+    def _parse_task_response(self, response: str, gap: Gap) -> Task:
+        """Parse LLM response into a Task object."""
+        # Default values
+        task_data = {
+            "id": str(uuid.uuid4())[:8],
+            "title": f"Implement {gap.section}",
+            "description": gap.description,
+            "acceptance_criteria": [],
+            "technical_approach": "",
+            "testing_requirements": [],
+            "complexity": 3,
+            "dependencies": [],
+            "status": "pending"
+        }
         
-        Args:
-            gap: The gap to create a task from
+        current_section = None
+        for line in response.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
             
-        Returns:
-            Created task
-        """
-        # Map affected_files to target_files
-        target_files = gap.affected_files if hasattr(gap, 'affected_files') else []
+            if line.startswith('ACCEPTANCE CRITERIA:'):
+                current_section = 'acceptance'
+            elif line.startswith('TECHNICAL APPROACH:'):
+                current_section = 'approach'
+            elif line.startswith('TESTING REQUIREMENTS:'):
+                current_section = 'testing'
+            elif line.startswith('COMPLEXITY:'):
+                task_data['complexity'] = int(line.split(':')[1].strip()[0])
+            elif line.startswith('DEPENDENCIES:'):
+                current_section = 'dependencies'
+            elif line.startswith('- '):
+                if current_section == 'acceptance':
+                    task_data['acceptance_criteria'].append(line[2:])
+                elif current_section == 'testing':
+                    task_data['testing_requirements'].append(line[2:])
+                elif current_section == 'dependencies':
+                    task_data['dependencies'].append(line[2:])
+            elif current_section == 'approach':
+                task_data['technical_approach'] += line + '\n'
         
         return Task(
-            id=str(uuid.uuid4()),
-            type=gap.type,
-            description=gap.description,
-            priority=gap.priority,
-            target_files=target_files,  # Use the mapped target_files
-            requirements=gap.requirements,
-            current_state=gap.current_state,
-            desired_state=gap.desired_state,
-            dependencies=[]
+            id=task_data['id'],
+            title=task_data['title'],
+            description=task_data['description'],
+            acceptance_criteria=task_data['acceptance_criteria'],
+            technical_approach=task_data['technical_approach'],
+            testing_requirements=task_data['testing_requirements'],
+            complexity=task_data['complexity'],
+            dependencies=task_data['dependencies'],
+            status=task_data['status']
         )
     
     def _analyze_task_dependencies(self, tasks: List[Task]) -> Dict[str, List[str]]:

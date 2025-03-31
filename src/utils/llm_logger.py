@@ -32,22 +32,23 @@ class LLMLogger:
             purpose: Purpose of the LLM calls (e.g., "whitepaper_processing", "codebase_analysis")
         """
         self.current_purpose = purpose
-        self.current_session = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Create purpose-specific directory
         purpose_dir = self.log_dir / purpose
         purpose_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create log file for this session
-        self.current_file = purpose_dir / f"session_{self.current_session}.md"
-        
-        # Write header
-        with open(self.current_file, 'w', encoding='utf-8') as f:
-            f.write(f"# LLM Interactions: {purpose}\n")
-            f.write(f"Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        # Only create a new session file if one doesn't exist
+        if not self.current_file or not self.current_file.exists():
+            self.current_session = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.current_file = purpose_dir / f"session_{self.current_session}.md"
             
-        # Clean up old logs
-        self._cleanup_old_logs(purpose)
+            # Write header
+            with open(self.current_file, 'w', encoding='utf-8') as f:
+                f.write(f"# LLM Interactions: {purpose}\n")
+                f.write(f"Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            
+            # Clean up old logs
+            self._cleanup_old_logs(purpose)
         
     def log_interaction(self, 
                        system_prompt: str,

@@ -6,8 +6,8 @@ and the requirements specified in the whitepaper.
 """
 
 import logging
-from typing import Dict, List, Any
-from dataclasses import dataclass
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass, field
 from ..utils.llm_logger import LLMLogger
 from .codebase_analyzer import CodebaseAnalyzer
 import os
@@ -22,8 +22,17 @@ class Gap:
     affected_files: List[str]
     priority: int
     implementation_details: Dict[str, Any]
-    suggested_fixes: List[str]  # Suggested fixes
-    type: str = "general"  # More generic default type
+    suggested_fixes: List[str]
+    type: str = "general"
+    description: str = ""
+    requirements: List[str] = field(default_factory=list)
+    missing_components: List[str] = field(default_factory=list)
+    confidence: str = "medium"
+    
+    def __post_init__(self):
+        """Set description based on reason if not provided."""
+        if not self.description:
+            self.description = self.reason
 
 
 class GapAnalyzer:
@@ -65,181 +74,231 @@ class GapAnalyzer:
             self.logger.error(f"Failed to analyze codebase: {str(e)}")
             raise
 
-    def identify_gaps(self, whitepaper: Dict[str, Any], current_state: Dict[str, Any]) -> List[Gap]:
-        """
-        Compare whitepaper requirements against current codebase implementation.
-        
-        Args:
-            whitepaper: Dictionary containing whitepaper analysis results
-            current_state: Dictionary containing current codebase state
-            
-        Returns:
-            List of Gap objects representing identified gaps
-        """
+    def identify_gaps(self, whitepaper: Dict[str, Any], codebase_index: Dict[str, Any]) -> List[Gap]:
+        """Compare all whitepaper requirements against the codebase index in a single analysis."""
         try:
-            self.gaps = []
-            
             # Start a new LLM logging session for gap analysis
             self.llm_logger.start_session("gap_analysis")
+            self.logger.info("Starting gap analysis")
             
-            # Get features from whitepaper
+            # Format the features from whitepaper
             features = whitepaper.get("features", [])
-            if not features:
-                self.logger.warning("No features found in whitepaper analysis")
-                return []
+            features_text = "\n".join(
+                f"Feature: {feature['name']}\n"
+                f"Description: {feature.get('description', '')}\n"
+                for feature in features
+            )
             
-            self.logger.info(f"Total features to analyze: {len(features)}")
+            # Create a single analysis prompt
+            prompt = f"""Analyze which features from the whitepaper are implemented in the codebase:
+
+WHITEPAPER FEATURES:
+{features_text}
+
+CODEBASE IMPLEMENTATION:
+{self._format_codebase_analysis(codebase_index)}
+
+For each feature listed in the whitepaper above, provide your analysis in this format:
+FEATURE: <feature name>
+STATUS: <fully/partially/not> implemented
+REASON: <detailed explanation>
+FOUND IN: <list of relevant code elements>
+MISSING COMPONENTS: <list of missing pieces>
+CONFIDENCE: <high/medium/low>
+
+Analyze each feature separately, but consider relationships between features when relevant.
+"""
             
-            # Get actual files and their contents from current_state
-            actual_files = list(current_state.keys())
-            self.logger.info(f"Found {len(actual_files)} files in codebase")
+            # Get analysis for all features at once
+            response = self._get_llm_response(
+                "You are a code analysis expert. Analyze implementation status of multiple features.",
+                prompt
+            )
             
-            # Analyze each feature from whitepaper
-            for feature in features:
-                feature_name = feature["name"]
-                feature_desc = feature["description"]
-                feature_section = feature.get("section", "general")
-                
-                self.logger.info(f"Analyzing feature: {feature_name}")
-                
-                # Check if feature is implemented
-                status, reason, files, details, suggestions = self._analyze_feature(
-                    feature_name,
-                    feature_desc,
-                    current_state,
-                    actual_files
-                )
-                
-                self.logger.info(f"Analysis result for {feature_name}: {status}")
-                
-                # Create gap if feature is not fully implemented
-                if status.lower() not in ["complete", "completed", "implemented", "done", "finished", "ready"]:
-                    gap = Gap(
-                        section=feature_section,
-                        status=status.lower(),
-                        reason=reason,
-                        affected_files=files,
-                        priority=self._determine_priority(status.lower(), feature_section),
-                        implementation_details=details,
-                        suggested_fixes=suggestions,
-                        type=feature_section.split(" - ")[0].lower()
-                    )
-                    self.gaps.append(gap)
-                    self.logger.info(f"Gap identified for {feature_name}: {reason}")
+            # Parse the response into individual gaps
+            self.gaps = self._parse_multi_feature_analysis(response, features)
             
-            self.logger.info(f"Total gaps identified: {len(self.gaps)}")
+            self.logger.info(f"Identified {len(self.gaps)} gaps")
             return self.gaps
             
         except Exception as e:
             self.logger.error(f"Failed to identify gaps: {str(e)}")
             raise
-            
-    def _analyze_feature(self, 
-                        feature_name: str,
-                        feature_desc: str,
-                        current_state: Dict[str, Any],
-                        actual_files: List[str]) -> tuple[str, str, List[str], Dict[str, Any], List[str]]:
-        """
-        Analyze a feature to determine its implementation status.
+
+    def _format_features(self, features: List[Dict[str, Any]]) -> str:
+        """Format the list of features for the prompt."""
+        formatted = []
+        for i, feature in enumerate(features, 1):
+            formatted.append(f"{i}. {feature['name']}")
+            formatted.append(f"   Description: {feature.get('description', '')}\n")
+        return "\n".join(formatted)
+
+    def _parse_multi_feature_analysis(self, response: str, features: List[Dict[str, Any]]) -> List[Gap]:
+        """Parse the multi-feature analysis response into individual gaps."""
+        gaps = []
+        total_features = len(features)
+        current_feature = None
+        current_analysis = {}
         
-        Args:
-            feature_name: Name of the feature to analyze
-            feature_desc: Description of the feature
-            current_state: Dictionary containing current codebase state
-            actual_files: List of existing files in the codebase
+        self.logger.debug(f"Starting to parse analysis for {total_features} features")
+        
+        for line in response.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
             
-        Returns:
-            Tuple of (status, reason, affected_files, details, suggestions)
-        """
+            self.logger.debug(f"Processing line: {line}")
+            
+            if line.startswith('FEATURE:'):
+                # Save previous feature analysis if it exists
+                if current_feature and current_analysis:
+                    self.logger.debug(f"Current status: {current_analysis.get('status', 'unknown')}")
+                    if current_analysis.get("status", "").lower() not in ["fully implemented", "fully"]:
+                        self.logger.debug(f"Creating gap for {current_feature['name']}")
+                        gap = self._create_gap(
+                            feature=current_feature,
+                            status=current_analysis.get("status", "not"),
+                            confidence=current_analysis.get("confidence", "medium"),
+                            reason=current_analysis.get("reason", ""),
+                            missing_components=current_analysis.get("missing_components", [])
+                        )
+                        gaps.append(gap)
+                
+                # Start new feature analysis
+                feature_name = line.replace('FEATURE:', '').strip()
+                self.logger.debug(f"Starting analysis of feature: {feature_name}")
+                current_feature = next(
+                    (f for f in features if f["name"].endswith(feature_name)), 
+                    {"name": feature_name, "description": ""}
+                )
+                current_analysis = {}
+                
+            elif line.startswith('STATUS:'):
+                status = line.split(':', 1)[1].strip().lower()
+                current_analysis["status"] = status
+                self.logger.debug(f"Found status: {status}")
+            elif line.startswith('REASON:'):
+                current_analysis["reason"] = line.split(':', 1)[1].strip()
+            elif line.startswith('FOUND IN:'):
+                found_in = line.split(':', 1)[1].strip()
+                if found_in and found_in.lower() != "none":
+                    current_analysis["found_in"] = [item.strip() for item in found_in.split(',')]
+            elif line.startswith('MISSING COMPONENTS:'):
+                missing = line.split(':', 1)[1].strip()
+                if missing and missing.lower() != "none":
+                    current_analysis["missing_components"] = [item.strip() for item in missing.split('.')]
+            elif line.startswith('CONFIDENCE:'):
+                current_analysis["confidence"] = line.split(':', 1)[1].strip()
+        
+        # Process the last feature if needed
+        if current_feature and current_analysis:
+            self.logger.debug(f"Processing final feature: {current_feature['name']} with status {current_analysis.get('status', 'unknown')}")
+            if current_analysis.get("status", "").lower() not in ["fully implemented", "fully"]:
+                gap = self._create_gap(
+                    feature=current_feature,
+                    status=current_analysis.get("status", "not"),
+                    confidence=current_analysis.get("confidence", "medium"),
+                    reason=current_analysis.get("reason", ""),
+                    missing_components=current_analysis.get("missing_components", [])
+                )
+                gaps.append(gap)
+        
+        self.logger.debug(f"Found {len(gaps)} gaps")
+        self.logger.info(f"Identified {len(gaps)} gaps out of {total_features} total features")
+        
+        return gaps
+
+    def _format_codebase_analysis(self, codebase_index: Dict[str, Any]) -> str:
+        """Format codebase analysis for LLM prompt."""
+        # Just return the complete analysis text as-is
+        if "analysis_text" in codebase_index:
+            return codebase_index["analysis_text"]
+        return "No codebase analysis available."
+
+    def _is_feature_match(self, feature: Dict[str, Any], implementation: Dict[str, Any]) -> bool:
+        """Check if an implementation matches a feature requirement."""
+        feature_name = feature.get("name", "").lower()
+        feature_desc = feature.get("description", "").lower()
+        
+        impl_name = implementation.get("name", "").lower()
+        impl_desc = implementation.get("description", "").lower()
+        
+        # Check for name matches
+        if feature_name in impl_name or impl_name in feature_name:
+            return True
+        
+        # Check for description matches
+        if any(word in impl_desc for word in feature_desc.split()):
+            return True
+        
+        return False
+
+    def _extract_required_components(self, description: str) -> List[str]:
+        """Extract required components from feature description."""
+        # Use LLM to identify required components
+        prompt = f"""Given this feature description, list the key components required for implementation:
+
+Description: {description}
+
+Format your response as a list of technical components, one per line:
+- component1
+- component2
+etc.
+"""
+        
         try:
-            # Create prompt for LLM
-            prompt = f"""Analyze if this feature is implemented in the codebase.
-
-Feature to analyze:
-Name: {feature_name}
-Description: {feature_desc}
-
-Current codebase structure:
-Files that exist: {', '.join(actual_files)}
-
-Actual code from relevant files:
-"""
-            # Add the actual file contents
-            for file_path in actual_files:
-                prompt += f"\n=== {file_path} ===\n"
-                if file_path in self.file_contents:
-                    prompt += f"```python\n{self.file_contents[file_path]}\n```\n"
-                else:
-                    prompt += "(File not accessible)\n"
-
-            prompt += """
-IMPORTANT: 
-1. Analyze the actual code shown above.
-2. Be specific about what exists and what's missing.
-3. Reference specific parts of the code in your analysis.
-4. If suggesting changes, consider the existing code structure.
-
-Provide your analysis in this format:
-STATUS: <complete/partial/missing/planned>
-REASON: <explanation with specific references to the code>
-FILES: <affected files>
-CURRENT_STATE: <detailed analysis of current implementation>
-MISSING_COMPONENTS:
-- <component 1>
-- <component 2>
-IMPLEMENTATION_STRATEGY: <explain whether to modify existing files or create new ones, and why>
-SUGGESTED_APPROACH: <detailed implementation approach>
-SUGGESTIONS:
-- <suggestion 1>
-- <suggestion 2>
-"""
-            
-            # Get response from LLM
             response = self._get_llm_response(
-                "You are a code analysis expert. Analyze if the feature is implemented and provide detailed feedback. Focus on the actual codebase structure and suggest improvements within existing files.",
+                "You are a technical analyst. Extract required implementation components.",
                 prompt
             )
             
-            # Parse response
-            status = self._extract_section(response, "STATUS:")
-            reason = self._extract_section(response, "REASON:")
-            files = [f.strip() for f in self._extract_section(response, "FILES:").split('\n') if f.strip()]
-            current_state = self._extract_section(response, "CURRENT_STATE:")
-            missing_components = [c.strip()[2:] for c in self._extract_section(response, "MISSING_COMPONENTS:").split('\n') if c.strip().startswith('- ')]
-            suggested_approach = self._extract_section(response, "SUGGESTED_APPROACH:")
-            suggestions = [s.strip()[2:] for s in self._extract_section(response, "SUGGESTIONS:").split('\n') if s.strip().startswith('- ')]
-            
-            # Validate files mentioned in response
-            valid_files = [f for f in files if f in actual_files]
-            if len(valid_files) != len(files):
-                self.logger.warning(f"Some files mentioned in analysis do not exist: {set(files) - set(valid_files)}")
-            
-            details = {
-                "current_state": current_state,
-                "missing_components": missing_components,
-                "suggested_approach": suggested_approach
-            }
-            
-            return status, reason, valid_files, details, suggestions
+            components = []
+            for line in response.split('\n'):
+                if line.strip().startswith('- '):
+                    components.append(line.strip()[2:])
+            return components
             
         except Exception as e:
-            self.logger.error(f"Failed to analyze feature: {str(e)}")
-            return "error", str(e), [], {}, []
-            
-    def _extract_section(self, response: str, section: str) -> str:
-        """Extract content from a section in the LLM response."""
-        try:
-            start = response.find(section)
-            if start == -1:
-                return ""
-            start += len(section)
-            end = response.find('\n\n', start)
-            if end == -1:
-                end = len(response)
-            return response[start:end].strip()
-        except Exception:
-            return ""
-            
+            self.logger.error(f"Failed to extract components: {str(e)}")
+            return []
+
+    def _find_component(self, component: str, codebase_index: Dict[str, Any]) -> bool:
+        """Check if a component exists in the codebase."""
+        component = component.lower()
+        
+        # Check all sections of the codebase index
+        for section in ["functions", "classes", "apis", "ui_elements", "constants"]:
+            for item in codebase_index.get(section, []):
+                if component in item.get("name", "").lower() or \
+                   component in item.get("description", "").lower():
+                    return True
+        
+        return False
+
+    def _create_gap(self, 
+                   feature: Dict[str, Any], 
+                   status: str, 
+                   confidence: str,
+                   reason: str = "",
+                   missing_components: List[str] = None) -> Gap:
+        """Create a Gap object without implementation suggestions."""
+        return Gap(
+            section=feature['name'],
+            status=status,
+            reason=reason or f"Feature {status} with {confidence} confidence",
+            affected_files=[],  # This can be populated later if needed
+            priority=self._determine_priority(status, feature['name']),
+            implementation_details={
+                "missing_components": missing_components or []
+            },
+            suggested_fixes=[],  # This can be populated later if needed
+            type=feature['name'].split(" - ")[0].lower(),
+            description=feature['description'],
+            requirements=[],
+            missing_components=missing_components or [],
+            confidence=confidence
+        )
+
     def _determine_priority(self, status: str, section: str) -> int:
         """Determine priority level for a gap."""
         # Base priority on status
@@ -257,9 +316,14 @@ SUGGESTIONS:
             base_priority += 1
             
         return min(base_priority, 5)  # Cap at 5
-        
+    
     def _get_llm_response(self, system_prompt: str, user_prompt: str) -> str:
-        """Get response from OpenAI's GPT-4 model."""
+        """Get response from LLM."""
+        # Add debug logging
+        self.logger.debug(f"Making LLM call from: {system_prompt}")
+        import traceback
+        self.logger.debug(f"Call stack:\n{traceback.format_stack()}")
+        
         try:
             from openai import OpenAI
             from dotenv import load_dotenv
@@ -395,7 +459,7 @@ CHANGES EXPLAINED:
                 "You are an expert code implementer. Generate complete, working code that implements the missing functionality while maintaining the existing codebase structure and style.",
                 prompt
             )
-
+            
             # Parse the response into a map of file changes
             file_changes = {}
             current_file = None
@@ -405,7 +469,7 @@ CHANGES EXPLAINED:
                 if line.startswith('---FILE:'):
                     if current_file and current_content:
                         file_changes[current_file] = '\n'.join(current_content)
-                        current_content = []
+                    current_content = []
                     current_file = line.replace('---FILE:', '').strip()
                 elif line.startswith('CHANGES EXPLAINED:'):
                     if current_file and current_content:
@@ -413,9 +477,9 @@ CHANGES EXPLAINED:
                     break
                 elif current_file:
                     current_content.append(line)
-
+            
             return file_changes
-
+            
         except Exception as e:
             self.logger.error(f"Failed to implement gap: {str(e)}")
-            raise 
+            raise
