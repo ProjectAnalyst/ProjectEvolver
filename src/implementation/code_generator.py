@@ -41,8 +41,8 @@ class CodeGenerator:
             while i < len(diff_lines):
                 line = diff_lines[i]
                 
-                # Skip empty lines and diff headers
-                if not line or line.startswith('@@'):
+                # Skip empty lines, diff headers, and diff markers
+                if not line or line.startswith('@@') or line.startswith('diff --git'):
                     i += 1
                     continue
                 
@@ -51,7 +51,7 @@ class CodeGenerator:
                     i += 1
                     continue
                 
-                # Handle added lines
+                # Handle added lines - remove the '+' prefix
                 if line.startswith('+ '):
                     new_lines.append(line[2:])
                     i += 1
@@ -228,9 +228,15 @@ Consider the following when generating changes:
                     if not full_path.exists():
                         self.logger.info(f"Creating new file: {full_path}")
                         full_path.parent.mkdir(parents=True, exist_ok=True)
+                        # Remove any diff markers from the content
+                        clean_content = '\n'.join(
+                            line[2:] if line.startswith('+ ') else line
+                            for line in diff_content.split('\n')
+                            if not line.startswith('- ') and not line.startswith('@@') and not line.startswith('diff --git')
+                        )
                         with open(full_path, 'w', encoding='utf-8') as f:
-                            f.write(diff_content)
-                        modified_files[str(full_path)] = diff_content
+                            f.write(clean_content)
+                        modified_files[str(full_path)] = clean_content
                         continue
                     
                     # For existing files, apply the diff
@@ -280,13 +286,18 @@ Implementation approach:
             from dotenv import load_dotenv
             import httpx
             
-            # Load environment variables
-            load_dotenv()
+            # Load environment variables from project root
+            env_path = Path(__file__).parent.parent.parent / '.env'
+            if env_path.exists():
+                load_dotenv(env_path)
+                self.logger.info(f"Loaded environment variables from {env_path}")
+            else:
+                self.logger.warning(f"No .env file found at {env_path}")
             
             # Get API key
-            api_key = os.getenv('OPENAI_API_KEY')
+            api_key = os.getenv('openai_token')
             if not api_key:
-                raise ValueError("OPENAI_API_KEY not found in environment variables")
+                raise ValueError("openai_token not found in environment variables. Please ensure it's set in your .env file.")
             
             # Create transport
             transport = httpx.HTTPTransport(retries=3)

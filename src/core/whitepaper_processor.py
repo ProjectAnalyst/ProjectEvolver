@@ -214,14 +214,20 @@ Ignore these sections:
             from openai import OpenAI
             from dotenv import load_dotenv
             import httpx
+            from pathlib import Path
             
-            # Load environment variables from .env file
-            load_dotenv()
+            # Load environment variables from project root
+            env_path = Path(__file__).parent.parent.parent / '.env'
+            if env_path.exists():
+                load_dotenv(env_path)
+                self.logger.info(f"Loaded environment variables from {env_path}")
+            else:
+                self.logger.warning(f"No .env file found at {env_path}")
             
             # Get API key
-            api_key = os.getenv('OPENAI_API_KEY')
+            api_key = os.getenv('openai_token')
             if not api_key:
-                raise ValueError("OPENAI_API_KEY not found in environment variables")
+                raise ValueError("openai_token not found in environment variables. Please ensure it's set in your .env file.")
             
             # Create a custom transport without proxies
             transport = httpx.HTTPTransport(retries=3)

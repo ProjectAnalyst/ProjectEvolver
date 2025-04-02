@@ -37,14 +37,7 @@ class GitOperator:
         """
         self.repo_path = repo_path or Path.cwd()
         self.current_branch: Optional[str] = None
-        
-        # Load GitHub token from environment if not provided
-        self.github_token = github_token
-        if not self.github_token:
-            self.github_token = os.getenv("GITHUB_TOKEN")
-            if not self.github_token:
-                print("Warning: No GitHub token found in environment variables")
-        
+        self.github_token = github_token or os.getenv("GITHUB_TOKEN")
         self.has_token = bool(self.github_token)  # Track if we have a token
         
         # Configure git credentials
@@ -69,15 +62,6 @@ class GitOperator:
             # Configure git to use HTTPS instead of SSH
             if not self._run_git_command(["config", "--global", "url.https://github.com/.insteadOf", "git@github.com:"]):
                 return False
-            
-            # Set up the credential helper to use the token
-            if self.github_token:
-                # Create or update the credentials file
-                credentials_path = os.path.expanduser("~/.git-credentials")
-                with open(credentials_path, "a") as f:
-                    f.write(f"https://{self.github_token}@github.com\n")
-                # Set proper permissions
-                os.chmod(credentials_path, 0o600)
             
             return True
         except Exception as e:
@@ -106,6 +90,11 @@ class GitOperator:
             current_url = result.stdout.strip()
             print(f"Current remote URL: {current_url}")  # Debug log
             
+            # If URL already contains token, don't modify it
+            if self.github_token in current_url:
+                print("Token already in URL")  # Debug log
+                return True
+            
             # Extract the repository path from the current URL
             if "github.com" in current_url:
                 # Remove any existing authentication
@@ -117,9 +106,9 @@ class GitOperator:
                 if repo_path.endswith(".git"):
                     repo_path = repo_path[:-4]
                 
-                # Set clean URL without token
-                new_url = f"https://github.com/{repo_path}.git"
-                print(f"Setting clean remote URL: {new_url}")  # Debug log
+                # Construct new URL with token
+                new_url = f"https://{self.github_token}@github.com/{repo_path}.git"
+                print(f"Setting new remote URL: {new_url}")  # Debug log
                 
                 # Set new URL for origin
                 if not self._run_git_command(["remote", "set-url", "origin", new_url]):
@@ -170,12 +159,10 @@ class GitOperator:
                         if repo_path.endswith(".git"):
                             repo_path = repo_path[:-4]
                         new_url = f"https://{self.github_token}@github.com/{repo_path}.git"
-                        print(f"Updating remote URL with token: {new_url}")  # Debug log
                         if not self._run_git_command(["remote", "set-url", "origin", new_url]):
                             print("Failed to update remote URL with token")
                             return False
             
-            # Run the git command
             result = subprocess.run(
                 ["git"] + command,
                 cwd=self.repo_path,

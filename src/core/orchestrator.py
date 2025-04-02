@@ -38,11 +38,16 @@ class ProjectEvolver:
         # Configure logging
         self._setup_logging()
         
-        # Load environment variables from .env file
-        load_dotenv()
-        
-        # Load configuration
+        # Load configuration first to get project root
         self.config = Config(config_path)
+        
+        # Load environment variables from .env file in project root
+        env_path = self.config.config.project_root / '.env'
+        if env_path.exists():
+            load_dotenv(env_path)
+            self.logger.info(f"Loaded environment variables from {env_path}")
+        else:
+            self.logger.warning(f"No .env file found at {env_path}")
         
         # Initialize components
         self._initialize_components()
