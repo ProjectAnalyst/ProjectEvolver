@@ -2,24 +2,16 @@
 Main orchestrator for Project Evolver.
 
 This module coordinates the interaction between all components to implement
-the project evolution workflow. It manages the main loop of analyzing the project,
-planning improvements, and implementing changes.
+the project evolution workflow.
 """
 
 import logging
 from typing import Optional, List, Dict, Any
 from pathlib import Path
-from dataclasses import dataclass
 
 from ..analysis.codebase_analyzer import CodebaseAnalyzer
 from ..analysis.gap_analyzer import GapAnalyzer
-from ..planning.task_planner import TaskPlanner
-from ..planning.dependency_analyzer import DependencyAnalyzer
-from ..planning.task_prioritizer import TaskPrioritizer
 from ..implementation.code_generator import CodeGenerator
-from ..implementation.validator import Validator
-from ..implementation.progress_tracker import ProgressTracker
-from ..implementation.error_handler import ErrorHandler
 from ..implementation.file_manager import FileManager
 from .git_operator import GitOperator
 from .whitepaper_processor import WhitepaperProcessor
@@ -36,31 +28,11 @@ class TestError(Exception):
     pass
 
 
-@dataclass
-class Task:
-    """Represents an actionable task for improving the codebase."""
-    id: str
-    type: str
-    description: str
-    priority: int
-    target_files: List[str]
-    requirements: List[str]
-    current_state: str
-    desired_state: str
-    dependencies: List[str] = None
-    status: str = "pending"  # pending, in_progress, completed, failed
-
-
 class ProjectEvolver:
     """Main orchestrator class that coordinates the project evolution process."""
     
     def __init__(self, config_path: Optional[Path] = None):
-        """
-        Initialize the Project Evolver with configuration.
-        
-        Args:
-            config_path: Optional path to configuration file
-        """
+        """Initialize the Project Evolver with configuration."""
         # Configure logging
         self._setup_logging()
         
@@ -93,70 +65,54 @@ class ProjectEvolver:
     
     def _initialize_components(self):
         """Initialize all component classes."""
-        # Analysis components
         self.codebase_analyzer = CodebaseAnalyzer()
         self.gap_analyzer = GapAnalyzer()
-        
-        # Planning components
-        self.task_planner = TaskPlanner()
-        self.dependency_analyzer = DependencyAnalyzer()
-        self.task_prioritizer = TaskPrioritizer()
-        
-        # Implementation components
         self.code_generator = CodeGenerator()
-        self.validator = Validator()
-        self.progress_tracker = ProgressTracker()
-        self.error_handler = ErrorHandler()
         self.file_manager = FileManager(project_root=self.config.config.project_root, enable_backups=True)
     
-    def evolve_project(self, repo_url: str, whitepaper_path: str) -> None:
+    def evolve_project(self, repo_url: str, whitepaper_path: str, max_features: int = 1) -> None:
         """
         Evolve a project based on its whitepaper.
         
         Args:
             repo_url: URL of the GitHub repository
             whitepaper_path: Path to the whitepaper file
+            max_features: Maximum number of features to implement
         """
         self.logger.info(f"Starting evolution process for repository: {repo_url}")
         
         try:
-            # 1. Initial Analysis Phase
-            self.logger.info("Starting analysis phase...")
+            # Analyze project and get gaps
             gaps = self.analyze_project(repo_url, whitepaper_path)
             
-            # 2. Planning Phase
-            self.logger.info("Starting planning phase...")
-            tasks = self.plan_improvements(gaps)
+            # Sort gaps by priority
+            prioritized_gaps = sorted(gaps, key=lambda g: g.priority, reverse=True)
             
-            # 3. Implementation Phase
-            self.logger.info(f"Starting project evolution with {len(tasks)} tasks")
+            # Take only the specified number of gaps
+            gaps_to_implement = prioritized_gaps[:max_features]
             
-            for task in tasks:
+            self.logger.info(f"Implementing {len(gaps_to_implement)} feature(s)...")
+            
+            # Implement each gap
+            for gap in gaps_to_implement:
                 try:
-                    self.logger.info(f"Implementing task: {task.description}")
+                    self.logger.info(f"Implementing: {gap.section}")
                     
                     # Generate changes
-                    changes = self.code_generator.generate_changes(task)
+                    changes = self.code_generator.generate_changes(gap)
                     if not changes:
-                        self.logger.warning(f"No changes generated for task: {task.description}")
+                        self.logger.warning(f"No changes generated for gap: {gap.section}")
                         continue
                     
-                    # Wrap changes in expected format
-                    wrapped_changes = {"file_updates": changes}
-                    
                     # Apply changes
-                    self.file_manager.apply_changes(wrapped_changes)
+                    self.file_manager.apply_changes({"file_updates": changes})
                     
-                    # Validate changes
-                    if not self.validator.validate_changes(changes):
-                        raise ValidationError(f"Changes failed validation for task: {task.description}")
-                    
-                    self.logger.info(f"Successfully implemented task: {task.description}")
+                    self.logger.info(f"Successfully implemented gap: {gap.section}")
                     
                 except Exception as e:
-                    self.logger.error(f"Failed to implement task: {str(e)}")
+                    self.logger.error(f"Failed to implement gap: {str(e)}")
                     continue
-                
+            
             self.logger.info("Project evolution completed")
             
         except Exception as e:
@@ -213,40 +169,4 @@ class ProjectEvolver:
         gaps = self.gap_analyzer.identify_gaps(whitepaper, current_state)
         self.logger.info(f"Identified {len(gaps)} gaps")
         
-        return gaps
-    
-    def plan_improvements(self, gaps: List[dict]) -> List[Task]:
-        """
-        Plan improvements based on identified gaps.
-        
-        Args:
-            gaps: List of identified gaps
-            
-        Returns:
-            List of tasks to implement
-        """
-        self.logger.info("Starting improvement planning phase...")
-        
-        # Create tasks from gaps
-        self.logger.info("Creating tasks from identified gaps...")
-        tasks = self.task_planner.create_tasks(gaps)
-        self.logger.info(f"Created {len(tasks)} tasks")
-        
-        # Build dependency graph
-        self.logger.info("Building task dependency graph...")
-        dependencies = self.dependency_analyzer.build_graph(tasks)
-        self.logger.info(f"Graph contains {len(dependencies)} nodes")
-        
-        # Prioritize tasks
-        self.logger.info("Prioritizing tasks...")
-        prioritized_tasks = self.task_prioritizer.order_tasks(dependencies)
-        self.logger.info("Task prioritization complete")
-        
-        # Log task details
-        for task in tasks:
-            self.logger.info(f"Task {task.id}: {task.description}")
-            self.logger.info(f"  Priority: {task.priority}")
-            self.logger.info(f"  Target files: {task.target_files}")
-            self.logger.info(f"  Dependencies: {task.dependencies}")
-        
-        return tasks 
+        return gaps 

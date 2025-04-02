@@ -34,6 +34,7 @@ def main():
     parser.add_argument('--config', help='Path to configuration file', default='config.json')
     parser.add_argument('--whitepaper', help='Path to whitepaper file (optional, will look in docs/whitepaper.md by default)')
     parser.add_argument('--token', help='GitHub token for authentication')
+    parser.add_argument('--max-features', type=int, default=1, help='Maximum number of features to implement (default: 1)')
     
     args = parser.parse_args()
     
@@ -51,7 +52,7 @@ def main():
         
         # Start evolution process
         logger.info(f"Starting evolution process for repository: {args.repository}")
-        evolver.evolve_project(args.repository, args.whitepaper)
+        evolver.evolve_project(args.repository, args.whitepaper, args.max_features)
         
         logger.info("Project evolution completed successfully")
         

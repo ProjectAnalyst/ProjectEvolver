@@ -95,7 +95,7 @@ WHITEPAPER FEATURES:
 CODEBASE IMPLEMENTATION:
 {self._format_codebase_analysis(codebase_index)}
 
-For each feature listed in the whitepaper above, provide your analysis in this format:
+For each feature listed in the whitepaper above, provide your analysis in this exact format (do not use markdown or special formatting):
 FEATURE: <feature name>
 STATUS: <fully/partially/not> implemented
 REASON: <detailed explanation>
@@ -128,81 +128,89 @@ Analyze each feature separately, but consider relationships between features whe
     def _parse_multi_feature_analysis(self, response: str, features: List[Dict[str, Any]]) -> List[Gap]:
         """Parse the multi-feature analysis response into individual gaps."""
         gaps = []
-        total_features = len(features)
         current_feature = None
         current_analysis = {}
         
-        # DEBUG: Print the entire response
-        print("DEBUG - FULL RESPONSE:")
-        print(response)
+        # Split response into lines and clean them
+        lines = [line.strip() for line in response.split('\n') if line.strip()]
         
-        for line in response.split('\n'):
-            line = line.strip()
+        for line in lines:
+            # Remove markdown formatting if present
+            line = line.replace('###', '').replace('**', '').strip()
+            
+            # Skip empty lines
             if not line:
                 continue
-            
-            if line.startswith('FEATURE:'):
-                # DEBUG: Print when we find a feature
-                print(f"DEBUG - Found feature line: {line}")
                 
+            # Check for feature start
+            if line.lower().startswith('feature:'):
                 # Save previous feature analysis if it exists
                 if current_feature and current_analysis:
                     status = current_analysis.get("status", "").lower()
-                    print(f"DEBUG - Processing feature {current_feature.get('name')} with status {status}")
-                    
                     if "fully implemented" not in status and "fully" != status:
-                        gap = {
-                            "name": current_feature.get("name", "Unknown"),
-                            "status": current_analysis.get("status", "not implemented"),
-                            "description": current_feature.get("description", ""),
-                            "reason": current_analysis.get("reason", ""),
-                            "missing_components": current_analysis.get("missing_components", []),
-                            "confidence": current_analysis.get("confidence", "medium")
-                        }
+                        gap = Gap(
+                            section=current_feature.get("name", "Unknown"),
+                            status=current_analysis.get("status", "not implemented"),
+                            reason=current_analysis.get("reason", ""),
+                            affected_files=[],  # Will be populated later if needed
+                            priority=self._determine_priority(current_analysis.get("status", ""), current_feature.get("name", "")),
+                            implementation_details={
+                                "missing_components": current_analysis.get("missing_components", [])
+                            },
+                            suggested_fixes=[],  # Will be populated later if needed
+                            type=current_feature.get("name", "").split(" - ")[0].lower(),
+                            description=current_feature.get("description", ""),
+                            requirements=[],
+                            missing_components=current_analysis.get("missing_components", []),
+                            confidence=current_analysis.get("confidence", "medium")
+                        )
                         gaps.append(gap)
-                        print(f"DEBUG - Added gap for {gap['name']} with status {gap['status']}")
                 
                 # Start new feature analysis
-                feature_name = line.replace('FEATURE:', '').strip()
+                feature_name = line.split(':', 1)[1].strip()
                 current_feature = {"name": feature_name, "description": ""}
                 current_analysis = {}
                 
-            elif line.startswith('STATUS:'):
-                status = line.split(':', 1)[1].strip()
-                current_analysis["status"] = status
-                print(f"DEBUG - Found status: {status}")
+            # Process other fields
+            elif line.lower().startswith(('status:', 'reason:', 'found in:', 'missing components:', 'confidence:')):
+                field = line.split(':', 1)[0].lower().strip()
+                value = line.split(':', 1)[1].strip()
                 
-            elif line.startswith('REASON:'):
-                current_analysis["reason"] = line.split(':', 1)[1].strip()
-            elif line.startswith('MISSING COMPONENTS:'):
-                missing = line.split(':', 1)[1].strip()
-                if missing and missing.lower() != "none":
-                    current_analysis["missing_components"] = [item.strip() for item in missing.split('.')]
-            elif line.startswith('CONFIDENCE:'):
-                current_analysis["confidence"] = line.split(':', 1)[1].strip()
+                if field == 'status':
+                    current_analysis["status"] = value
+                elif field == 'reason':
+                    current_analysis["reason"] = value
+                elif field == 'missing components':
+                    if value.lower() != "none":
+                        current_analysis["missing_components"] = [item.strip() for item in value.split(',')]
+                elif field == 'confidence':
+                    current_analysis["confidence"] = value
         
         # Process the last feature
         if current_feature and current_analysis:
             status = current_analysis.get("status", "").lower()
-            print(f"DEBUG - Processing final feature {current_feature.get('name')} with status {status}")
-            
             if "fully implemented" not in status and "fully" != status:
-                gap = {
-                    "name": current_feature.get("name", "Unknown"),
-                    "status": current_analysis.get("status", "not implemented"),
-                    "description": current_feature.get("description", ""),
-                    "reason": current_analysis.get("reason", ""),
-                    "missing_components": current_analysis.get("missing_components", []),
-                    "confidence": current_analysis.get("confidence", "medium")
-                }
+                gap = Gap(
+                    section=current_feature.get("name", "Unknown"),
+                    status=current_analysis.get("status", "not implemented"),
+                    reason=current_analysis.get("reason", ""),
+                    affected_files=[],  # Will be populated later if needed
+                    priority=self._determine_priority(current_analysis.get("status", ""), current_feature.get("name", "")),
+                    implementation_details={
+                        "missing_components": current_analysis.get("missing_components", [])
+                    },
+                    suggested_fixes=[],  # Will be populated later if needed
+                    type=current_feature.get("name", "").split(" - ")[0].lower(),
+                    description=current_feature.get("description", ""),
+                    requirements=[],
+                    missing_components=current_analysis.get("missing_components", []),
+                    confidence=current_analysis.get("confidence", "medium")
+                )
                 gaps.append(gap)
-                print(f"DEBUG - Added final gap for {gap['name']} with status {gap['status']}")
         
-        print(f"DEBUG - FINAL GAPS LIST: {gaps}")
-        
-        # Store gaps and log ONLY ONCE
+        # Store gaps and log
         self.gaps = gaps
-        print(f"DEBUG - Stored {len(self.gaps)} gaps in self.gaps")
+        self.logger.info(f"Parsed {len(self.gaps)} gaps from analysis")
         
         return self.gaps
 
@@ -384,100 +392,3 @@ etc.
         except Exception as e:
             self.logger.error(f"Failed to get LLM response: {str(e)}")
             raise 
-
-    def implement_gap(self, gap: Gap, current_state: Dict[str, Any]) -> Dict[str, str]:
-        """
-        Generate implementation code for a given gap.
-        
-        Args:
-            gap: Gap object containing analysis details
-            current_state: Current state of the codebase
-            
-        Returns:
-            Dict mapping file paths to their updated content
-        """
-        try:
-            # Start implementation session
-            self.llm_logger.start_session("gap_implementation")
-            
-            # Create implementation prompt
-            prompt = f"""Generate the implementation code for the following gap:
-
-FEATURE GAP:
-Name: {gap.section}
-Status: {gap.status}
-Reason: {gap.reason}
-
-CURRENT STATE:
-{gap.implementation_details['current_state']}
-
-MISSING COMPONENTS:
-{chr(10).join(f"- {component}" for component in gap.implementation_details['missing_components'])}
-
-IMPLEMENTATION APPROACH:
-{gap.implementation_details['suggested_approach']}
-
-FILES TO MODIFY:
-{chr(10).join(gap.affected_files)}
-
-Current code in affected files:
-"""
-            # Add current file contents
-            for file_path in gap.affected_files:
-                if file_path in current_state:
-                    prompt += f"\n--- {file_path} ---\n"
-                    if isinstance(current_state[file_path], dict):
-                        # Handle structured content
-                        prompt += str(current_state[file_path])
-                    else:
-                        # Handle raw file content
-                        prompt += str(current_state[file_path])
-
-            prompt += """
-IMPORTANT:
-1. Provide complete, implementation-ready code for each file that needs to be modified
-2. Maintain the existing code style and structure
-3. Include clear comments explaining the changes
-4. Only modify the specified files
-5. Ensure the implementation addresses all missing components
-
-Format your response as follows for each file:
-
----FILE: <filename>---
-```python
-<complete file content with your changes>
-```
-CHANGES EXPLAINED:
-- <explanation of major changes>
-- <explanation of how this addresses the gap>
-"""
-
-            # Get implementation from LLM
-            response = self._get_llm_response(
-                "You are an expert code implementer. Generate complete, working code that implements the missing functionality while maintaining the existing codebase structure and style.",
-                prompt
-            )
-            
-            # Parse the response into a map of file changes
-            file_changes = {}
-            current_file = None
-            current_content = []
-            
-            for line in response.split('\n'):
-                if line.startswith('---FILE:'):
-                    if current_file and current_content:
-                        file_changes[current_file] = '\n'.join(current_content)
-                    current_content = []
-                    current_file = line.replace('---FILE:', '').strip()
-                elif line.startswith('CHANGES EXPLAINED:'):
-                    if current_file and current_content:
-                        file_changes[current_file] = '\n'.join(current_content)
-                    break
-                elif current_file:
-                    current_content.append(line)
-            
-            return file_changes
-            
-        except Exception as e:
-            self.logger.error(f"Failed to implement gap: {str(e)}")
-            raise
