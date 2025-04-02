@@ -29,7 +29,9 @@ class Gap:
     requirements: List[str] = field(default_factory=list)
     missing_components: List[str] = field(default_factory=list)
     confidence: str = "medium"
-    file_metadata: Dict[str, Any] = field(default_factory=dict)  # New field for file metadata
+    file_metadata: Dict[str, Any] = field(default_factory=dict)
+    file_contents: Dict[str, str] = field(default_factory=dict)  # New field for file contents
+    file_changes: Dict[str, str] = field(default_factory=dict)  # New field for required changes per file
     
     def __post_init__(self):
         """Set description based on reason if not provided."""
@@ -128,11 +130,17 @@ For each feature, provide detailed analysis including file locations:
 FEATURE: <feature_name>
 STATUS: <implemented/partial/missing>
 REASON: <detailed explanation>
-FOUND IN: 
-- EXISTING FILES TO MODIFY: <list specific files that need modification, with explanation of what needs to change>
-- NEW FILES NEEDED: <list new files needed, with purpose and suggested location>
-MISSING COMPONENTS: <specific components that need to be implemented>
-IMPLEMENTATION DETAILS:
+FILES_TO_MODIFY:
+- FILE: <file_path>
+  LOCATION: <specific location in file>
+  CHANGES: <detailed description of changes needed>
+  REASON: <why these changes are needed>
+NEW_FILES_NEEDED:
+- FILE: <file_path>
+  PURPOSE: <what this file will do>
+  LOCATION: <where it should be placed>
+MISSING_COMPONENTS: <specific components that need to be implemented>
+IMPLEMENTATION_DETAILS:
 - Current State: <description of current implementation if any>
 - Required Changes: <specific changes needed>
 - Dependencies: <any dependencies or prerequisites>
@@ -148,17 +156,45 @@ Be specific about where new code should be placed and how it integrates with exi
                 prompt
             )
             
-            # Parse response into gaps
-            gaps = self._parse_multi_feature_analysis(response, whitepaper.get("features", []))
+            # Parse response into feature analyses
+            feature_analyses = self._parse_multi_feature_analysis(response, whitepaper.get("features", []))
             
-            # Add file metadata to each gap
-            for gap in gaps:
-                gap.file_metadata = {
-                    file_path: self.file_metadata.get(file_path, {})
-                    for file_path in gap.affected_files
-                }
+            # Convert feature analyses into gaps
+            gaps = []
+            for feature_analysis in feature_analyses:
+                # Get file contents for the files mentioned in the analysis
+                file_contents = {}
+                for file_path in feature_analysis["files"]:
+                    if file_path in self.file_contents:
+                        file_contents[file_path] = self.file_contents[file_path]
+                
+                # Create a basic gap with the raw analysis
+                gap = Gap(
+                    section=feature_analysis["name"],
+                    status="not implemented",  # Default status
+                    reason="Feature analysis available",  # Default reason
+                    affected_files=feature_analysis["files"],  # Use the extracted files
+                    priority=3,  # Default priority
+                    implementation_details={
+                        "raw_analysis": feature_analysis["analysis"]
+                    },
+                    suggested_fixes=[],
+                    type=feature_analysis["name"].split(" - ")[0].lower(),
+                    description="",  # Will be extracted from analysis if needed
+                    requirements=[],
+                    missing_components=[],
+                    confidence="medium",
+                    file_metadata={},
+                    file_contents=file_contents,  # Add the file contents
+                    file_changes={}
+                )
+                gaps.append(gap)
             
-            return gaps
+            # Store gaps and log
+            self.gaps = gaps
+            self.logger.info(f"Created {len(self.gaps)} gaps from feature analyses")
+            
+            return self.gaps
             
         except Exception as e:
             self.logger.error(f"Failed to identify gaps: {str(e)}")
@@ -172,123 +208,59 @@ Be specific about where new code should be placed and how it integrates with exi
             formatted.append(f"   Description: {feature.get('description', '')}\n")
         return "\n".join(formatted)
 
-    def _parse_multi_feature_analysis(self, response: str, features: List[Dict[str, Any]]) -> List[Gap]:
-        """Parse the multi-feature analysis response into individual gaps."""
-        gaps = []
+    def _parse_multi_feature_analysis(self, response: str, features: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Parse the multi-feature analysis response into a list of raw feature analyses."""
+        feature_analyses = []
         current_feature = None
-        current_analysis = {}
+        current_analysis = []
+        current_files = []
         
-        # Split response into lines and clean them
-        lines = [line.strip() for line in response.split('\n') if line.strip()]
+        # Split response into lines
+        lines = response.split('\n')
         
         for line in lines:
-            # Remove markdown formatting if present
-            line = line.replace('###', '').replace('**', '').strip()
-            
-            # Skip empty lines
-            if not line:
-                continue
-                
-            # Check for feature start
-            if line.lower().startswith('feature:'):
+            # Check for feature start - handle both markdown and plain formats
+            if line.strip().lower().startswith(('### feature:', 'feature:')):
                 # Save previous feature analysis if it exists
                 if current_feature and current_analysis:
-                    status = current_analysis.get("status", "").lower()
-                    if status not in ["implemented", "fully implemented", "complete", "fully"]:
-                        # Create gap with all the information
-                        gap = Gap(
-                            section=current_feature.get("name", "Unknown"),
-                            status=current_analysis.get("status", "not implemented"),
-                            reason=current_analysis.get("reason", ""),
-                            affected_files=current_analysis.get("existing_files", []),
-                            priority=self._determine_priority(current_analysis.get("status", ""), current_feature.get("name", "")),
-                            implementation_details={
-                                "current_state": current_analysis.get("current_state", "No current implementation"),
-                                "required_changes": current_analysis.get("required_changes", "No changes specified"),
-                                "dependencies": current_analysis.get("dependencies", "No dependencies"),
-                                "new_files": current_analysis.get("new_files", []),
-                                "missing_components": current_analysis.get("missing_components", []),
-                                "file_structure_impact": current_analysis.get("file_structure_impact", "No structural impact specified")
-                            },
-                            suggested_fixes=[],
-                            type=current_feature.get("name", "").split(" - ")[0].lower(),
-                            description=current_feature.get("description", ""),
-                            requirements=[],
-                            missing_components=current_analysis.get("missing_components", []),
-                            confidence=current_analysis.get("confidence", "medium"),
-                            file_metadata=current_analysis.get("file_metadata", {})
-                        )
-                        gaps.append(gap)
+                    feature_analyses.append({
+                        "name": current_feature,
+                        "analysis": '\n'.join(current_analysis),
+                        "files": current_files
+                    })
                 
                 # Start new feature analysis
-                feature_name = line.split(':', 1)[1].strip()
-                current_feature = {"name": feature_name, "description": ""}
-                current_analysis = {}
+                # Remove markdown formatting if present
+                feature_line = line.replace('###', '').strip()
+                current_feature = feature_line.split(':', 1)[1].strip()
+                current_analysis = []
+                current_files = []
+            else:
+                # Add line to current analysis
+                current_analysis.append(line)
                 
-            # Process other fields
-            elif line.lower().startswith('status:'):
-                current_analysis["status"] = line.split(':', 1)[1].strip()
-            elif line.lower().startswith('reason:'):
-                current_analysis["reason"] = line.split(':', 1)[1].strip()
-            elif line.lower().startswith('found in:'):
-                current_analysis["existing_files"] = []
-                current_analysis["new_files"] = []
-            elif line.lower().startswith('- existing files to modify:'):
-                value = line.split(':', 1)[1].strip()
-                if value.lower() != "none" and value.lower() != "none.":
-                    current_analysis["existing_files"] = [f.strip() for f in value.split(',')]
-            elif line.lower().startswith('- new files needed:'):
-                value = line.split(':', 1)[1].strip()
-                if value.lower() != "none" and value.lower() != "none.":
-                    current_analysis["new_files"] = [f.strip() for f in value.split(',')]
-            elif line.lower().startswith('missing components:'):
-                value = line.split(':', 1)[1].strip()
-                if value.lower() != "none" and value.lower() != "none.":
-                    current_analysis["missing_components"] = [item.strip() for item in value.split(',')]
-            elif line.lower().startswith('- current state:'):
-                current_analysis["current_state"] = line.split(':', 1)[1].strip()
-            elif line.lower().startswith('- required changes:'):
-                current_analysis["required_changes"] = line.split(':', 1)[1].strip()
-            elif line.lower().startswith('- dependencies:'):
-                current_analysis["dependencies"] = line.split(':', 1)[1].strip()
-            elif line.lower().startswith('- file structure impact:'):
-                current_analysis["file_structure_impact"] = line.split(':', 1)[1].strip()
-            elif line.lower().startswith('confidence:'):
-                current_analysis["confidence"] = line.split(':', 1)[1].strip()
+                # Check for file paths in the line
+                if line.strip().lower().startswith('- existing files to modify:'):
+                    # Extract file paths from the line
+                    files_text = line.split(':', 1)[1].strip()
+                    if files_text.lower() not in ["none", "none."]:
+                        # Split by comma and clean up each file path
+                        files = [f.strip().strip('`') for f in files_text.split(',')]
+                        # Extract just the file path from each entry
+                        current_files = [f.split(':')[0].strip() for f in files]
         
-        # Process the last feature
+        # Add final feature analysis if exists
         if current_feature and current_analysis:
-            status = current_analysis.get("status", "").lower()
-            if status not in ["implemented", "fully implemented", "complete", "fully"]:
-                gap = Gap(
-                    section=current_feature.get("name", "Unknown"),
-                    status=current_analysis.get("status", "not implemented"),
-                    reason=current_analysis.get("reason", ""),
-                    affected_files=current_analysis.get("existing_files", []),
-                    priority=self._determine_priority(current_analysis.get("status", ""), current_feature.get("name", "")),
-                    implementation_details={
-                        "current_state": current_analysis.get("current_state", "No current implementation"),
-                        "required_changes": current_analysis.get("required_changes", "No changes specified"),
-                        "dependencies": current_analysis.get("dependencies", "No dependencies"),
-                        "new_files": current_analysis.get("new_files", []),
-                        "missing_components": current_analysis.get("missing_components", []),
-                        "file_structure_impact": current_analysis.get("file_structure_impact", "No structural impact specified")
-                    },
-                    suggested_fixes=[],
-                    type=current_feature.get("name", "").split(" - ")[0].lower(),
-                    description=current_feature.get("description", ""),
-                    requirements=[],
-                    missing_components=current_analysis.get("missing_components", []),
-                    confidence=current_analysis.get("confidence", "medium"),
-                    file_metadata=current_analysis.get("file_metadata", {})
-                )
-                gaps.append(gap)
+            feature_analyses.append({
+                "name": current_feature,
+                "analysis": '\n'.join(current_analysis),
+                "files": current_files
+            })
         
-        # Store gaps and log
-        self.gaps = gaps
-        self.logger.info(f"Parsed {len(self.gaps)} gaps from analysis")
+        # Store analyses and log
+        self.logger.info(f"Parsed {len(feature_analyses)} feature analyses")
         
-        return self.gaps
+        return feature_analyses
 
     def _format_codebase_analysis(self, codebase_index: Dict[str, Any]) -> str:
         """Format codebase analysis for LLM prompt."""

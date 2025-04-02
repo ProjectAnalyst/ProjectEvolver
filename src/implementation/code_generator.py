@@ -32,7 +32,30 @@ class CodeGenerator:
             # Start LLM logging session
             self.llm_logger.start_session("code_generation")
             
-            # Format the gap information nicely
+            # Parse file information from implementation details
+            files_to_modify = []
+            if 'raw_analysis' in gap.implementation_details:
+                analysis = gap.implementation_details['raw_analysis']
+                # Parse files to modify from the structured format
+                current_file = None
+                current_info = {}
+                for line in analysis.split('\n'):
+                    line = line.strip()
+                    if line.startswith('- FILE:'):
+                        if current_file:
+                            files_to_modify.append((current_file, current_info))
+                        current_file = line[7:].strip()
+                        current_info = {}
+                    elif line.startswith('  LOCATION:'):
+                        current_info['location'] = line[11:].strip()
+                    elif line.startswith('  CHANGES:'):
+                        current_info['changes'] = line[10:].strip()
+                    elif line.startswith('  REASON:'):
+                        current_info['reason'] = line[9:].strip()
+                if current_file:
+                    files_to_modify.append((current_file, current_info))
+            
+            # Initialize gap info with basic information
             gap_info = f"""# Feature Gap Analysis
 
 ## Feature Details
@@ -45,50 +68,29 @@ class CodeGenerator:
 ## Description
 {gap.description}
 
-## Current State
-{gap.implementation_details.get('current_state', 'No current implementation')}
-
-## Required Changes
-{gap.implementation_details.get('required_changes', 'No changes specified')}
-
-## Dependencies
-{gap.implementation_details.get('dependencies', 'No dependencies')}
+## Implementation Details
+{gap.implementation_details.get('raw_analysis', 'No current implementation')}
 
 ## Missing Components
 {', '.join(gap.missing_components)}
 
-## File Structure Impact
-{gap.implementation_details.get('file_structure_impact', 'No structural impact specified')}
-
-## FOUND IN
-"""
-            # Add information about existing files to modify
-            if gap.affected_files:
-                gap_info += "\n### EXISTING FILES TO MODIFY:\n"
-                for file_path in gap.affected_files:
-                    gap_info += f"\n#### {file_path}\n"
-                    if file_path in gap.file_metadata:
-                        metadata = gap.file_metadata[file_path]
-                        gap_info += f"- Type: {metadata.get('type', 'unknown')}\n"
-                        gap_info += f"- Classes: {', '.join(metadata.get('classes', []))}\n"
-                        gap_info += f"- Functions: {', '.join(metadata.get('functions', []))}\n"
-                        gap_info += f"- Dependencies: {len(metadata.get('dependencies', {}).get('internal', []))} internal, "
-                        gap_info += f"{len(metadata.get('dependencies', {}).get('external', []))} external\n"
-                    
-                    # Add current file content if it exists
-                    full_path = codebase_root / file_path
-                    if full_path.exists() and full_path.is_file():  # Only try to read if it's a file
-                        with open(full_path, 'r', encoding='utf-8') as f:
-                            gap_info += f"\nCurrent content:\n```python\n{f.read()}\n```\n"
-                    elif full_path.exists() and full_path.is_dir():
-                        self.logger.warning(f"Skipping directory: {file_path}")
+## Files to Modify"""
             
-            # Add information about new files needed
-            if gap.implementation_details.get('new_files'):
-                gap_info += "\n### NEW FILES NEEDED:\n"
-                for new_file in gap.implementation_details['new_files']:
-                    if new_file:  # Skip empty strings
-                        gap_info += f"- {new_file}\n"
+            # Add information about existing files to modify
+            if files_to_modify:
+                for file_path, file_info in files_to_modify:
+                    gap_info += f"\n### {file_path}\n"
+                    if 'location' in file_info:
+                        gap_info += f"- Location: {file_info['location']}\n"
+                    if 'changes' in file_info:
+                        gap_info += f"- Changes: {file_info['changes']}\n"
+                    if 'reason' in file_info:
+                        gap_info += f"- Reason: {file_info['reason']}\n"
+                    
+                    # Get the file content if available
+                    file_content = gap.file_contents.get(file_path, '')
+                    if file_content:
+                        gap_info += f"\nCurrent file content:\n```python\n{file_content}\n```\n"
             
             # Create implementation prompt
             prompt = f"""Generate code to implement this feature gap:
@@ -111,6 +113,9 @@ Consider the following when generating code:
 3. Handle dependencies properly
 4. Follow the project's architectural patterns
 5. Include appropriate error handling
+6. Implement all required changes specified for each file
+7. Ensure all missing components are implemented
+8. Follow the file structure impact guidelines
 """
             
             # Get response from LLM
