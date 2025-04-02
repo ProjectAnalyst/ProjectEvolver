@@ -17,7 +17,6 @@ from ..implementation.code_generator import CodeGenerator
 from ..implementation.file_manager import FileManager
 from .git_operator import GitOperator
 from .whitepaper_processor import WhitepaperProcessor
-from .config import Config
 
 
 class ValidationError(Exception):
@@ -33,16 +32,16 @@ class TestError(Exception):
 class ProjectEvolver:
     """Main orchestrator class that coordinates the project evolution process."""
     
-    def __init__(self, config_path: Optional[Path] = None):
-        """Initialize the Project Evolver with configuration."""
+    def __init__(self, project_root: Optional[str | Path] = None):
+        """Initialize the Project Evolver."""
         # Configure logging
         self._setup_logging()
         
-        # Load configuration first to get project root
-        self.config = Config(config_path)
+        # Set project root - ensure it's a Path object
+        self.project_root = Path(project_root) if project_root else Path.cwd()
         
         # Load environment variables from .env file in project root
-        env_path = self.config.config.project_root / '.env'
+        env_path = self.project_root / '.env'
         if env_path.exists():
             load_dotenv(env_path)
             self.logger.info(f"Loaded environment variables from {env_path}")
@@ -54,7 +53,7 @@ class ProjectEvolver:
         
         # Initialize git operator with token from environment
         self.git_operator = GitOperator(
-            repo_path=self.config.config.project_root,
+            repo_path=self.project_root,
             github_token=os.getenv("GITHUB_TOKEN")
         )
         
@@ -78,7 +77,7 @@ class ProjectEvolver:
         self.codebase_analyzer = CodebaseAnalyzer()
         self.gap_analyzer = GapAnalyzer()
         self.code_generator = CodeGenerator()
-        self.file_manager = FileManager(project_root=self.config.config.project_root, enable_backups=True)
+        self.file_manager = FileManager(project_root=self.project_root, enable_backups=True)
     
     def evolve_project(self, repo_url: str, whitepaper_path: str, max_features: int = 1) -> None:
         """
