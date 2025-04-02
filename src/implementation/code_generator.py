@@ -32,10 +32,68 @@ class CodeGenerator:
             # Start LLM logging session
             self.llm_logger.start_session("code_generation")
             
+            # Format the gap information nicely
+            gap_info = f"""# Feature Gap Analysis
+
+## Feature Details
+- **Name**: {gap.section}
+- **Status**: {gap.status}
+- **Type**: {gap.type}
+- **Priority**: {gap.priority}
+- **Confidence**: {gap.confidence}
+
+## Description
+{gap.description}
+
+## Current State
+{gap.implementation_details.get('current_state', 'No current implementation')}
+
+## Required Changes
+{gap.implementation_details.get('required_changes', 'No changes specified')}
+
+## Dependencies
+{gap.implementation_details.get('dependencies', 'No dependencies')}
+
+## Missing Components
+{', '.join(gap.missing_components)}
+
+## File Structure Impact
+{gap.implementation_details.get('file_structure_impact', 'No structural impact specified')}
+
+## FOUND IN
+"""
+            # Add information about existing files to modify
+            if gap.affected_files:
+                gap_info += "\n### EXISTING FILES TO MODIFY:\n"
+                for file_path in gap.affected_files:
+                    gap_info += f"\n#### {file_path}\n"
+                    if file_path in gap.file_metadata:
+                        metadata = gap.file_metadata[file_path]
+                        gap_info += f"- Type: {metadata.get('type', 'unknown')}\n"
+                        gap_info += f"- Classes: {', '.join(metadata.get('classes', []))}\n"
+                        gap_info += f"- Functions: {', '.join(metadata.get('functions', []))}\n"
+                        gap_info += f"- Dependencies: {len(metadata.get('dependencies', {}).get('internal', []))} internal, "
+                        gap_info += f"{len(metadata.get('dependencies', {}).get('external', []))} external\n"
+                    
+                    # Add current file content if it exists
+                    full_path = codebase_root / file_path
+                    if full_path.exists() and full_path.is_file():  # Only try to read if it's a file
+                        with open(full_path, 'r', encoding='utf-8') as f:
+                            gap_info += f"\nCurrent content:\n```python\n{f.read()}\n```\n"
+                    elif full_path.exists() and full_path.is_dir():
+                        self.logger.warning(f"Skipping directory: {file_path}")
+            
+            # Add information about new files needed
+            if gap.implementation_details.get('new_files'):
+                gap_info += "\n### NEW FILES NEEDED:\n"
+                for new_file in gap.implementation_details['new_files']:
+                    if new_file:  # Skip empty strings
+                        gap_info += f"- {new_file}\n"
+            
             # Create implementation prompt
             prompt = f"""Generate code to implement this feature gap:
 
-{gap}
+{gap_info}
 
 Generate complete, implementation-ready code for each affected file.
 Format your response as:
@@ -46,6 +104,13 @@ FILE: <file_path>
 ```
 
 Repeat for each affected file.
+
+Consider the following when generating code:
+1. Maintain consistent code style with existing files
+2. Include all necessary imports
+3. Handle dependencies properly
+4. Follow the project's architectural patterns
+5. Include appropriate error handling
 """
             
             # Get response from LLM

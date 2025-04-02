@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from ..utils.llm_logger import LLMLogger
 from .codebase_analyzer import CodebaseAnalyzer
 import os
+import re
 
 
 @dataclass
@@ -28,6 +29,7 @@ class Gap:
     requirements: List[str] = field(default_factory=list)
     missing_components: List[str] = field(default_factory=list)
     confidence: str = "medium"
+    file_metadata: Dict[str, Any] = field(default_factory=dict)  # New field for file metadata
     
     def __post_init__(self):
         """Set description based on reason if not provided."""
@@ -46,6 +48,7 @@ class GapAnalyzer:
         self.codebase_analyzer = CodebaseAnalyzer()
         self.llm_logger = LLMLogger()
         self.file_contents = {}
+        self.file_metadata = {}  # New dictionary for storing file metadata
         
     def analyze_codebase(self, root_dir: str) -> None:
         """
@@ -55,19 +58,32 @@ class GapAnalyzer:
             root_dir: Root directory of the codebase
         """
         try:
-            # First get the CodebaseAnalyzer results
+            # Get the CodebaseAnalyzer results
             self.codebase_index = self.codebase_analyzer.analyze_codebase(root_dir)
             
-            # Now also read the actual file contents
+            # Enhanced file analysis
             self.file_contents = {}
+            self.file_metadata = {}  # New dictionary for storing file metadata
+            
             for file_path in self.codebase_index.keys():
                 full_path = os.path.join(root_dir, file_path)
                 try:
                     with open(full_path, 'r', encoding='utf-8') as f:
-                        self.file_contents[file_path] = f.read()
-                    self.logger.info(f"Successfully read contents of {file_path}")
+                        content = f.read()
+                        self.file_contents[file_path] = content
+                        
+                        # Extract metadata about the file
+                        self.file_metadata[file_path] = {
+                            'imports': self._extract_imports(content),
+                            'classes': self._extract_classes(content),
+                            'functions': self._extract_functions(content),
+                            'dependencies': self._analyze_dependencies(content),
+                            'type': self._determine_file_type(file_path, content)
+                        }
+                        
+                    self.logger.info(f"Successfully analyzed {file_path}")
                 except Exception as e:
-                    self.logger.error(f"Failed to read {file_path}: {str(e)}")
+                    self.logger.error(f"Failed to analyze {file_path}: {str(e)}")
                 
             self.logger.info("Codebase analysis completed")
         except Exception as e:
@@ -86,40 +102,44 @@ class GapAnalyzer:
             List of identified gaps
         """
         try:
-            # Start LLM logging session
             self.llm_logger.start_session("gap_analysis")
             
             # Format features for prompt
             features_text = self._format_features(whitepaper.get("features", []))
             codebase_text = self._format_codebase_analysis(codebase_index)
             
-            # Create analysis prompt
+            # Add structural information to the prompt
+            structure_text = self._format_codebase_structure()
+            
             prompt = f"""Analyze the gap between required features and current implementation.
-For each feature, determine if it is implemented, partially implemented, or missing.
-Also identify relevant existing files and suggest new files needed.
+Consider the current codebase structure and suggest the most appropriate locations for changes.
 
 REQUIRED FEATURES:
 {features_text}
 
-CURRENT CODEBASE:
+CURRENT CODEBASE STRUCTURE:
+{structure_text}
+
+CURRENT CODEBASE ANALYSIS:
 {codebase_text}
 
-For each feature, provide analysis in this format:
+For each feature, provide detailed analysis including file locations:
 
 FEATURE: <feature_name>
 STATUS: <implemented/partial/missing>
 REASON: <detailed explanation>
 FOUND IN: 
-- EXISTING RELATED FILES: <list of relevant existing files, with explanation why they're relevant>
-- NEW FILES NEEDED: < If feature cannot be implemented in existing files, list of suggested new files with purpose>
+- EXISTING FILES TO MODIFY: <list specific files that need modification, with explanation of what needs to change>
+- NEW FILES NEEDED: <list new files needed, with purpose and suggested location>
 MISSING COMPONENTS: <specific components that need to be implemented>
 IMPLEMENTATION DETAILS:
 - Current State: <description of current implementation if any>
 - Required Changes: <specific changes needed>
 - Dependencies: <any dependencies or prerequisites>
+- File Structure Impact: <how changes affect project structure>
 
-Analyze each feature thoroughly and provide specific file paths and explanations.
-If suggesting new files, explain their purpose and how they fit into the architecture.
+Consider existing file types and dependencies when suggesting changes.
+Be specific about where new code should be placed and how it integrates with existing files.
 """
             
             # Get LLM response
@@ -130,6 +150,13 @@ If suggesting new files, explain their purpose and how they fit into the archite
             
             # Parse response into gaps
             gaps = self._parse_multi_feature_analysis(response, whitepaper.get("features", []))
+            
+            # Add file metadata to each gap
+            for gap in gaps:
+                gap.file_metadata = {
+                    file_path: self.file_metadata.get(file_path, {})
+                    for file_path in gap.affected_files
+                }
             
             return gaps
             
@@ -173,21 +200,23 @@ If suggesting new files, explain their purpose and how they fit into the archite
                             section=current_feature.get("name", "Unknown"),
                             status=current_analysis.get("status", "not implemented"),
                             reason=current_analysis.get("reason", ""),
-                            affected_files=current_analysis.get("existing_files", []),  # From FOUND IN: EXISTING FILES
+                            affected_files=current_analysis.get("existing_files", []),
                             priority=self._determine_priority(current_analysis.get("status", ""), current_feature.get("name", "")),
                             implementation_details={
                                 "current_state": current_analysis.get("current_state", "No current implementation"),
                                 "required_changes": current_analysis.get("required_changes", "No changes specified"),
                                 "dependencies": current_analysis.get("dependencies", "No dependencies"),
-                                "new_files": current_analysis.get("new_files", []),  # From FOUND IN: NEW FILES NEEDED
-                                "missing_components": current_analysis.get("missing_components", [])
+                                "new_files": current_analysis.get("new_files", []),
+                                "missing_components": current_analysis.get("missing_components", []),
+                                "file_structure_impact": current_analysis.get("file_structure_impact", "No structural impact specified")
                             },
                             suggested_fixes=[],
                             type=current_feature.get("name", "").split(" - ")[0].lower(),
                             description=current_feature.get("description", ""),
                             requirements=[],
                             missing_components=current_analysis.get("missing_components", []),
-                            confidence=current_analysis.get("confidence", "medium")
+                            confidence=current_analysis.get("confidence", "medium"),
+                            file_metadata=current_analysis.get("file_metadata", {})
                         )
                         gaps.append(gap)
                 
@@ -204,7 +233,7 @@ If suggesting new files, explain their purpose and how they fit into the archite
             elif line.lower().startswith('found in:'):
                 current_analysis["existing_files"] = []
                 current_analysis["new_files"] = []
-            elif line.lower().startswith('- existing related files:'):
+            elif line.lower().startswith('- existing files to modify:'):
                 value = line.split(':', 1)[1].strip()
                 if value.lower() != "none" and value.lower() != "none.":
                     current_analysis["existing_files"] = [f.strip() for f in value.split(',')]
@@ -222,6 +251,8 @@ If suggesting new files, explain their purpose and how they fit into the archite
                 current_analysis["required_changes"] = line.split(':', 1)[1].strip()
             elif line.lower().startswith('- dependencies:'):
                 current_analysis["dependencies"] = line.split(':', 1)[1].strip()
+            elif line.lower().startswith('- file structure impact:'):
+                current_analysis["file_structure_impact"] = line.split(':', 1)[1].strip()
             elif line.lower().startswith('confidence:'):
                 current_analysis["confidence"] = line.split(':', 1)[1].strip()
         
@@ -240,14 +271,16 @@ If suggesting new files, explain their purpose and how they fit into the archite
                         "required_changes": current_analysis.get("required_changes", "No changes specified"),
                         "dependencies": current_analysis.get("dependencies", "No dependencies"),
                         "new_files": current_analysis.get("new_files", []),
-                        "missing_components": current_analysis.get("missing_components", [])
+                        "missing_components": current_analysis.get("missing_components", []),
+                        "file_structure_impact": current_analysis.get("file_structure_impact", "No structural impact specified")
                     },
                     suggested_fixes=[],
                     type=current_feature.get("name", "").split(" - ")[0].lower(),
                     description=current_feature.get("description", ""),
                     requirements=[],
                     missing_components=current_analysis.get("missing_components", []),
-                    confidence=current_analysis.get("confidence", "medium")
+                    confidence=current_analysis.get("confidence", "medium"),
+                    file_metadata=current_analysis.get("file_metadata", {})
                 )
                 gaps.append(gap)
         
@@ -435,3 +468,87 @@ etc.
         except Exception as e:
             self.logger.error(f"Failed to get LLM response: {str(e)}")
             raise 
+
+    def _extract_imports(self, content: str) -> List[str]:
+        """Extract import statements from file content."""
+        imports = []
+        for line in content.split('\n'):
+            if line.strip().startswith(('import ', 'from ')):
+                imports.append(line.strip())
+        return imports
+
+    def _extract_classes(self, content: str) -> List[str]:
+        """Extract class names from file content."""
+        classes = []
+        for line in content.split('\n'):
+            if line.strip().startswith('class '):
+                class_name = line.split('class ')[1].split('(')[0].strip()
+                classes.append(class_name)
+        return classes
+
+    def _extract_functions(self, content: str) -> List[str]:
+        """Extract function names from file content."""
+        functions = []
+        for line in content.split('\n'):
+            if line.strip().startswith('def '):
+                func_name = line.split('def ')[1].split('(')[0].strip()
+                functions.append(func_name)
+        return functions
+
+    def _analyze_dependencies(self, content: str) -> Dict[str, List[str]]:
+        """Analyze file dependencies based on imports and usage."""
+        dependencies = {
+            'direct': [],  # Direct imports
+            'internal': [], # Internal project dependencies
+            'external': []  # External package dependencies
+        }
+        
+        for line in content.split('\n'):
+            if line.strip().startswith(('import ', 'from ')):
+                if line.startswith('from .'):
+                    dependencies['internal'].append(line.strip())
+                elif line.startswith(('import ', 'from ')):
+                    dependencies['external'].append(line.strip())
+        return dependencies
+
+    def _determine_file_type(self, file_path: str, content: str) -> str:
+        """Determine the type/role of the file in the project."""
+        filename = file_path.lower()
+        if 'test' in filename:
+            return 'test'
+        elif 'api' in filename:
+            return 'api'
+        elif 'model' in filename or 'entity' in filename:
+            return 'model'
+        elif 'view' in filename or 'template' in filename:
+            return 'view'
+        elif 'controller' in filename:
+            return 'controller'
+        elif 'util' in filename:
+            return 'utility'
+        return 'other'
+
+    def _format_codebase_structure(self) -> str:
+        """Format codebase structural information for the prompt."""
+        structure = []
+        
+        # Group files by type
+        files_by_type = {}
+        for file_path, metadata in self.file_metadata.items():
+            file_type = metadata['type']
+            if file_type not in files_by_type:
+                files_by_type[file_type] = []
+            files_by_type[file_type].append((file_path, metadata))
+        
+        # Format the structure
+        for file_type, files in files_by_type.items():
+            structure.append(f"\n{file_type.upper()} FILES:")
+            for file_path, metadata in files:
+                structure.append(f"\n{file_path}")
+                structure.append(f"  Classes: {', '.join(metadata['classes'])}")
+                structure.append(f"  Functions: {', '.join(metadata['functions'])}")
+                structure.append(f"  Dependencies: {len(metadata['dependencies']['direct'])} direct, "
+                               f"{len(metadata['dependencies']['internal'])} internal, "
+                               f"{len(metadata['dependencies']['external'])} external")
+        
+        return '\n'.join(structure)
