@@ -6,8 +6,10 @@ the project evolution workflow.
 """
 
 import logging
+import os
 from typing import Optional, List, Dict, Any
 from pathlib import Path
+from dotenv import load_dotenv
 
 from ..analysis.codebase_analyzer import CodebaseAnalyzer
 from ..analysis.gap_analyzer import GapAnalyzer
@@ -36,16 +38,19 @@ class ProjectEvolver:
         # Configure logging
         self._setup_logging()
         
+        # Load environment variables from .env file
+        load_dotenv()
+        
         # Load configuration
         self.config = Config(config_path)
         
         # Initialize components
         self._initialize_components()
         
-        # Initialize git operator
+        # Initialize git operator with token from environment
         self.git_operator = GitOperator(
             repo_path=self.config.config.project_root,
-            github_token=self.config.config.github_token
+            github_token=os.getenv("GITHUB_TOKEN")
         )
         
         # Initialize whitepaper processor
@@ -103,13 +108,32 @@ class ProjectEvolver:
                     self.logger.info(f"Implementing: {gap.section}")
                     
                     # Generate changes - now passing repo_path as codebase_root
-                    changes = self.code_generator.generate_changes(gap, repo_path)
-                    if not changes:
+                    result = self.code_generator.generate_changes(gap, repo_path)
+                    if not result or not result['modified_files']:
                         self.logger.warning(f"No changes generated for gap: {gap.section}")
                         continue
                     
                     # Apply changes
-                    self.file_manager.apply_changes({"file_updates": changes})
+                    self.file_manager.apply_changes({"file_updates": result['modified_files']})
+                    
+                    # Get relative paths for git staging
+                    relative_paths = [str(Path(path).relative_to(repo_path)) for path in result['modified_files'].keys()]
+                    self.logger.info(f"Staging files: {relative_paths}")
+                    
+                    # Stage changes
+                    if not self.git_operator.stage_changes(relative_paths):
+                        self.logger.error("Failed to stage changes")
+                        continue
+                    
+                    # Commit changes
+                    if not self.git_operator.commit_changes(result['commit_message']):
+                        self.logger.error("Failed to commit changes")
+                        continue
+                    
+                    # Push changes
+                    if not self.git_operator.push_changes():
+                        self.logger.error("Failed to push changes")
+                        continue
                     
                     self.logger.info(f"Successfully implemented gap: {gap.section}")
                     

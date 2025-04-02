@@ -37,8 +37,102 @@ class GitOperator:
         """
         self.repo_path = repo_path or Path.cwd()
         self.current_branch: Optional[str] = None
-        self.github_token = github_token or os.getenv("GITHUB_TOKEN")
+        
+        # Load GitHub token from environment if not provided
+        self.github_token = github_token
+        if not self.github_token:
+            self.github_token = os.getenv("GITHUB_TOKEN")
+            if not self.github_token:
+                print("Warning: No GitHub token found in environment variables")
+        
         self.has_token = bool(self.github_token)  # Track if we have a token
+        
+        # Configure git credentials
+        self._configure_git_credentials()
+        
+        # Configure remote URL with token if available
+        if self.has_token:
+            self._configure_remote_url()
+    
+    def _configure_git_credentials(self) -> bool:
+        """
+        Configure git credentials to use the token.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Configure git to use the credential helper
+            if not self._run_git_command(["config", "--global", "credential.helper", "store"]):
+                return False
+            
+            # Configure git to use HTTPS instead of SSH
+            if not self._run_git_command(["config", "--global", "url.https://github.com/.insteadOf", "git@github.com:"]):
+                return False
+            
+            # Set up the credential helper to use the token
+            if self.github_token:
+                # Create or update the credentials file
+                credentials_path = os.path.expanduser("~/.git-credentials")
+                with open(credentials_path, "a") as f:
+                    f.write(f"https://{self.github_token}@github.com\n")
+                # Set proper permissions
+                os.chmod(credentials_path, 0o600)
+            
+            return True
+        except Exception as e:
+            print(f"Failed to configure git credentials: {str(e)}")
+            return False
+    
+    def _configure_remote_url(self) -> bool:
+        """
+        Configure the remote URL with GitHub token.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Get current remote URL
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                return False
+                
+            current_url = result.stdout.strip()
+            print(f"Current remote URL: {current_url}")  # Debug log
+            
+            # Extract the repository path from the current URL
+            if "github.com" in current_url:
+                # Remove any existing authentication
+                if "@" in current_url:
+                    current_url = current_url.split("@")[-1]
+                
+                # Ensure we have a clean repository path
+                repo_path = current_url.split("github.com/")[-1]
+                if repo_path.endswith(".git"):
+                    repo_path = repo_path[:-4]
+                
+                # Set clean URL without token
+                new_url = f"https://github.com/{repo_path}.git"
+                print(f"Setting clean remote URL: {new_url}")  # Debug log
+                
+                # Set new URL for origin
+                if not self._run_git_command(["remote", "set-url", "origin", new_url]):
+                    print("Failed to set new remote URL")
+                    return False
+                
+                return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"Failed to configure remote URL: {str(e)}")
+            return False
     
     def _run_git_command(self, command: List[str]) -> bool:
         """
@@ -51,13 +145,50 @@ class GitOperator:
             True if command succeeded, False otherwise
         """
         try:
+            # Set environment variables to prevent password prompts
+            env = os.environ.copy()
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            env["GIT_ASKPASS"] = "echo"  # Use echo as askpass to prevent prompts
+            env["SSH_ASKPASS"] = "echo"  # Also set SSH_ASKPASS to prevent SSH prompts
+            
+            # For push commands, ensure we have the token in the URL
+            if command[0] == "push" and self.has_token:
+                # Get the current remote URL
+                url_result = subprocess.run(
+                    ["git", "remote", "get-url", "origin"],
+                    cwd=self.repo_path,
+                    capture_output=True,
+                    text=True,
+                    env=env
+                )
+                
+                if url_result.returncode == 0:
+                    current_url = url_result.stdout.strip()
+                    if self.github_token not in current_url:
+                        # Update the URL with the token
+                        repo_path = current_url.split("github.com/")[-1]
+                        if repo_path.endswith(".git"):
+                            repo_path = repo_path[:-4]
+                        new_url = f"https://{self.github_token}@github.com/{repo_path}.git"
+                        print(f"Updating remote URL with token: {new_url}")  # Debug log
+                        if not self._run_git_command(["remote", "set-url", "origin", new_url]):
+                            print("Failed to update remote URL with token")
+                            return False
+            
+            # Run the git command
             result = subprocess.run(
                 ["git"] + command,
                 cwd=self.repo_path,
                 capture_output=True,
-                text=True
+                text=True,
+                env=env
             )
-            return result.returncode == 0
+            
+            if result.returncode != 0:
+                print(f"Git command failed: {result.stderr}")  # Debug log
+                return False
+                
+            return True
         except Exception as e:
             print(f"Git command failed: {str(e)}")
             return False
@@ -113,11 +244,6 @@ class GitOperator:
             if not self._run_git_command(["commit", "-m", message]):
                 return False
             
-            # Push changes if we have a token
-            if self.has_token:
-                if not self._run_git_command(["push", "origin", "main"]):
-                    return False
-            
             return True
         except Exception as e:
             print(f"Failed to commit changes: {str(e)}")
@@ -133,35 +259,30 @@ class GitOperator:
         Returns:
             True if successful, False otherwise
         """
-        if not branch:
-            # Get current branch name
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=self.repo_path,
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                branch = result.stdout.strip()
-            else:
-                branch = "main"  # Default to main if branch detection fails
-        
-        # Set up the remote URL with token if available
-        if self.github_token:
-            remote_url = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=self.repo_path,
-                capture_output=True,
-                text=True
-            )
-            if remote_url.returncode == 0:
-                url = remote_url.stdout.strip()
-                if url.startswith("https://"):
-                    new_url = f"https://{self.github_token}@" + url[8:]
-                    self._run_git_command(["remote", "set-url", "origin", new_url])
-        
-        # Push changes
-        return self._run_git_command(["push", "origin", branch])
+        try:
+            if not branch:
+                # Get current branch name
+                result = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=self.repo_path,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    branch = result.stdout.strip()
+                else:
+                    branch = "main"  # Default to main if branch detection fails
+            
+            # Push changes with token in URL
+            print(f"Pushing to branch: {branch}")  # Debug log
+            if not self._run_git_command(["push", "-u", "origin", branch]):
+                print(f"Failed to push changes to branch {branch}")
+                return False
+            
+            return True
+        except Exception as e:
+            print(f"Failed to push changes: {str(e)}")
+            return False
     
     def get_status(self) -> Dict[str, List[str]]:
         """
