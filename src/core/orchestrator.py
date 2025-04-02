@@ -91,6 +91,10 @@ class ProjectEvolver:
             # Take only the specified number of gaps
             gaps_to_implement = prioritized_gaps[:max_features]
             
+            # Get repository path
+            repo_name = repo_url.split('/')[-1].replace('.git', '')
+            repo_path = Path(repo_name)
+            
             self.logger.info(f"Implementing {len(gaps_to_implement)} feature(s)...")
             
             # Implement each gap
@@ -98,8 +102,8 @@ class ProjectEvolver:
                 try:
                     self.logger.info(f"Implementing: {gap.section}")
                     
-                    # Generate changes
-                    changes = self.code_generator.generate_changes(gap)
+                    # Generate changes - now passing repo_path as codebase_root
+                    changes = self.code_generator.generate_changes(gap, repo_path)
                     if not changes:
                         self.logger.warning(f"No changes generated for gap: {gap.section}")
                         continue

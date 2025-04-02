@@ -35,19 +35,7 @@ class CodeGenerator:
             # Create implementation prompt
             prompt = f"""Generate code to implement this feature gap:
 
-FEATURE:
-Name: {gap.section}
-Description: {gap.description}
-Status: {gap.status}
-Missing Components: {', '.join(gap.missing_components)}
-
-Current Implementation Details:
-{gap.implementation_details.get('current_state', 'No current implementation')}
-
-Required Changes:
-{gap.implementation_details.get('required_changes', 'No specific changes required')}
-
-Affected Files: {', '.join(gap.affected_files)}
+{gap}
 
 Generate complete, implementation-ready code for each affected file.
 Format your response as:
